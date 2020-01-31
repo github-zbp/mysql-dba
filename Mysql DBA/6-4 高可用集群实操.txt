@@ -1,0 +1,527 @@
+本操作是在上一节负载均衡的实例基础上继续完成的
+
+主1:54.22.37.21
+主2:54.22.37.18
+从1:54.22.37.20
+从2:54.22.37.19
+均衡1（主）：54.22.37.3
+均衡2（备份）：54.22.37.2
+web应用所在ip:204.175.124.51
+目标:test数据库
+
+在上一节中，主1和从1，从2的主从关系已经完成
+
+现在要完成主1和主2的主主复制和主2与从1、从2的主从复制：
+
+
+主1和主2的主主复制如下:
+
+==================== 主2 =====================
+# 创建授权用户
+grant replication slave on *.* to 'repl'@'54.22.37.%' identified by "xxxxx";
+
+# 查看binlog是否开启
+
+show variables like "%log_bin%";
++---------------------------------+-------+
+| Variable_name                   | Value |
++---------------------------------+-------+
+| log_bin                         | OFF   |
+| log_bin_basename                |       |
+| log_bin_index                   |       |
+| log_bin_trust_function_creators | OFF   |
+| log_bin_use_v1_row_events       | OFF   |
+| sql_log_bin                     | ON    |
++---------------------------------+-------+
+
+
+# 去开启binlong，并且启用同步日志
+server-id=18
+replicate-do-db=test
+replicate-do-db=mysql
+log-bin=/var/lib/mysql/mysql-bin
+log-bin-index=/var/lib/mysql/mysql-bin.index
+relay-log=/var/lib/mysql/relay-bin
+relay-log-index=/var/lib/mysql/relay-bin.index
+slave-skip-errors=all
+
+# 由于主1和主2服务器都是从一个镜像下复制的，所以其uuid一样，这里要改成不一样
+vi /var/lib/mysql/auto.cnf
+
+改为
+[auto]
+server-uuid=5088449b-3a71-11ea-8cdd-00156239020c
+
+PS：上面的uuid通过，select uuid()生成
+
+重启
+
+
+# 导入主1的test库备份
+set character_set_server=utf8;
+create database test;
+use test
+source /root/test.sql
+
+#change master指向主库1
+stop slave;
+reset slave;
+
+change master to master_host="54.22.37.21",master_user="repl",master_password="xxxxx",master_log_file="mysql-bin.000010",master_log_pos=154;    # 在主1查看show master status得到master_log_file和master_log_pos
+
+start slave;
+
+
+show slave status\G;
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 54.22.37.21
+                  Master_User: repl
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000010
+          Read_Master_Log_Pos: 154
+               Relay_Log_File: relay-bin.000002
+                Relay_Log_Pos: 320
+        Relay_Master_Log_File: mysql-bin.000010
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB: test
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 154
+              Relay_Log_Space: 521
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 86
+                  Master_UUID: dd8de4de-3e32-11e9-930e-00155d871a13
+             Master_Info_File: /var/lib/mysql/master.info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for more updates
+           Master_Retry_Count: 86400
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set:
+            Executed_Gtid_Set:
+                Auto_Position: 0
+         Replicate_Rewrite_DB:
+                 Channel_Name:
+           Master_TLS_Version:
+1 row in set (0.00 sec)
+
+
+========================  主1 =========================
+# 开启同步日志
+server-id=86
+log-bin=/var/lib/mysql/mysql-bin
+binlog_format=mixed
+
+replicate-do-db=test
+relay-log=/var/lib/mysql/relay-bin
+relay-log-index=/var/lib/mysql/relay-bin.index
+slave-skip-errors=all
+log_slave_updates=1         # 会将主2同步到主1的增删改操作记录到主1的binlog日志中
+
+# 重启mysql
+
+# 指向主2节点
+stop slave;
+reset slave;
+change master to master_host="54.22.37.18",master_user="repl",master_password="xxxxx",master_log_file="mysql-bin.000003",master_log_pos=154;
+start slave;
+
+# 查看slave状态
+show slave status;
+
+show slave status\G;
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 54.22.37.18
+                  Master_User: repl
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000003
+          Read_Master_Log_Pos: 154
+               Relay_Log_File: relay-bin.000002
+                Relay_Log_Pos: 320
+        Relay_Master_Log_File: mysql-bin.000003
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB: test
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 154
+              Relay_Log_Space: 521
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 18
+                  Master_UUID: 5088749b-3a71-11ea-8cdd-00155d39020c
+             Master_Info_File: /var/lib/mysql/master.info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for more updates
+           Master_Retry_Count: 86400
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set:
+            Executed_Gtid_Set:
+                Auto_Position: 0
+         Replicate_Rewrite_DB:
+                 Channel_Name:
+           Master_TLS_Version:
+
+
+
+
+           
+这样就完成了主1和主2的主主复制了。
+
+现在看两个有趣的现象：
+已知从1，从2和主1是主从复制关系。主1和主2是主主复制关系。
+
+那么在主2往test库插入一条数据，主1也会插入该数据，但是从1和从2却没有插入这条数据。
+原因如下：
+通过同步而对数据的变动（增删改）操作是不会记录到binlog日志中。只有对自己所在服务器上做出的mysql操作才会被记录到binlog日志。
+所以由于没有记录在binlog日志，所以从1和从2没有出现主2新插入的数据。
+
+如果想要在主2插入的数据也记录到主1的二进制日志，可以通过在主1配置一条 
+log_slave_updates=1
+
+重启即可
+
+这是在主1中设置,表示主1作为从节点会将主节点(主2)的增删改操作记录到binlog日志中。
+这样从1，从2也会发生相应的改变。
+
+
+还有一个现象：
+当从1插入一条数据，id为10，此时主1插入一条数据id也为10,但是其他字段内容不同，此时如果设置了skip-slave-errors,那么从1不会报错,但也不会改变。但其实主键已经冲突了。
+
+
+================= 配置高可用集群 ===============
+# 下载，解压，安装keepalived
+tar -xzf keepalived-2.0.19.tar.gz
+cd keepalived-2.0.19
+./configure             # 如果报错,请安装gcc-c++/openssl/openssl-devel这几个依赖
+make && make install
+
+# 对主1的keepalived配置：
+vi /usr/local/etc/keepalived/keepalived.conf
+
+内容如下：
+! Configuration File for keepalived
+
+global_defs {
+   router_id LVS_MASTER
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    virtual_router_id 51
+    priority 150
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass xxxxx
+    }
+    virtual_ipaddress {
+        54.22.37.25/24
+    }
+}
+  
+virtual_server 54.22.37.25 3306 {  
+
+    delay_loop 6     
+
+    lb_algo wrr     
+
+    lb_kind DR    
+
+    persistence_timeout 60     
+
+    protocol TCP          
+ 
+    real_server 54.22.37.21 3306 {  
+
+        weight 100         
+ 
+        notify_down /var/www/mysql_down.sh      # 表示当主1的mysql服务挂掉，就执行mysql_down.sh脚本。这个脚本的任务是关闭本节点的keepalived从而将虚拟IP指向转到另一个mysql正常的节点；如果想做的更好一些，可以调用php脚本发送邮件给开发者通知它mysql已崩溃
+
+        TCP_CHECK {  
+
+        connect_timeout 10  
+
+        nb_get_retry 3  
+
+        delay_before_retry 3  
+
+        connect_port 3306  
+
+        }  
+
+    }  
+
+}
+
+# 这里要注意一点很重要的：
+虚拟IP必须指定和主1，主2相同网段的且没有用过的IP，如果是正在使用的真实IP，那么之后mysql连接这个虚拟IP是连不上的。
+
+mysql.sh 
+内容如下：
+
+#!/bin/bash
+pkill keepalive
+
+chmod u+x mysql.sh
+
+启动keepalived
+keepalived -D -f /usr/local/etc/keepalived/keepalived.conf
+
+
+# 对主2的keepalived的配置
+将上面的配置修改几个地方，其他照搬：
+a.将54.22.37.21全部改为54.22.37.18
+b.将MASTER字符串改为BACKUP
+c.将priority改成100，备份节点（主2）的priority要比主节点（主1）低至少50，否则当主1恢复过来，虚拟IP还是指向主2。
+
+主2也要有mysql.sh
+
+启动keepalived
+keepalived -D -f /usr/local/etc/keepalived/keepalived.conf
+
+
+# 用负载均衡节点尝试连接该虚拟IP的mysql（因为主1和主2的mysql有在负载均衡节点授权用户），如果连接成功，则高可用配置成功。
+
+============================================================================
+那么现在主节点的高可用就搭建好了。
+接下来搭建负载均衡的高可用，我们之前在web应用所在节点使用haproxy实现负载均衡，按照高可用的逻辑，需要在两个节点上安装haproxy，同时这两个节点还要安装keepalived，然后这两个负载均衡节点要同时监控两个mysql从节点。
+
+但是其实，keepalived本身就可以实现负载均衡，所以如果从节点不多的情况下没有必要使用haproxy，我们直接在两台从服务器上安装keepalived并且使用同一个虚拟ip，即实现了负载均衡，也实现了高可用（从节点的高可用集群的虚拟IP不同于主节点的高可用集群的虚拟IP，此时从节点的高可用集群和主节点的高可用集群是两个不同的集群，所以他们的virtual_router_id和虚拟IP是不同的）。
+
+如果是从节点很多的情况，那么还是建议使用haproxy配合keepalived。haproxy和keepalived安装在一起，这样就对负载均衡节点进行高可用。
+如果从节点很多的情况，还是用直接在从节点上安装keepalived进行负载均衡的话。那么就要对每一个从节点的keepalived的配置文件进行修改，就会很麻烦。
+
+在这里我们模拟从节点很多的情况。
+
+========================  均衡1的操作 ========================
+操作前，在主1授权一个haproxy用户给所有54.22.37.%这个IP段的mysql使用，从1和从2会同时生成这个用户。
+这个用户是用于给均衡1、均衡2节点的haproxy连接从节点使用的。
+
+grant select on *.* to "haproxy"@"54.22.37.%" identified by "xxxxx";
+
+
+A.安装和配置haproxy，监控所有从节点
+B.安装和配置keepalived，对haproxy实施高可用
+
+A.步骤如下：
+tar -xzf haproxy-2.1.2.tar.gz
+cd haproxy-2.1.2
+make TARGET=Linux31
+make install PREFIX=/usr/local/haproxy
+mkdir /usr/local/haproxy/conf
+cp examples/option-http_proxy.cfg /usr/local/haproxy/conf/haproxy.cfg
+
+# 配置文件修改如下：
+global
+    daemon
+    nbproc 1
+    pidfile /usr/local/haproxy/conf/haproxy.pid
+    
+defaults
+    mode tcp
+    option redispatch
+    option abortonclose
+    maxconn 4096
+    timeout connect 5000ms
+    timeout client 30000ms
+    timeout server 30000ms
+    log 127.0.0.1 local0 err
+    
+listen test1
+    bind 0.0.0.0:3300
+    mode tcp
+    server s1 54.22.37.19:3306 check port 3306
+    server s1 54.22.37.20:3306 check port 3306
+    
+listen admin_stats
+    bind 0.0.0.0:8888
+    mode http
+    stats uri /haproxy
+    stats auth haproxy:haproxy
+
+# 将haproxy添加到环境变量，设置开机自启动haproxy
+cd ~ && vi .bashrc
+export PATH=$PATH:/usr/local/haproxy/sbin
+
+source .bashrc
+
+# 启动haproxy
+haproxy -f /uar/local/haproxy/conf/haproxy.cfg
+    
+# 在本地做一下连接测试
+mysql -h54.22.37.3 -uhaproxy -P3300 -p
+show variables like "%uuid%";
+\q
+mysql -h54.22.37.3 -uhaproxy -P3300 -p
+show variables like "%uuid%";
+
+如果两次显示的uuid不同，说明负载均衡成功。
+
+
+
+B.步骤如下:
+tar -xzf keepalived-2.0.19.tar.gz
+./configure
+make && make install
+
+# 修改配置文件（/usr/local/etc/keepalived/keepalived.conf）：
+! Configuration File for keepalived
+
+global_defs {
+   router_id LVS_HAPROXY_MASTER
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    virtual_router_id 52
+    priority 150
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        54.22.37.26/24
+    }
+}
+
+PS : 上面router_id，virtual_ipaddress以及virtual_router_id要和主1主2的keepalived的router_id不可重复。virtual_router_id、virtual_ipaddress一样则会被认为主1主2和均衡1均衡2是同一个集群，而实际上这是两个不同的集群。
+
+# 启动keepalived 
+keepalived -D -f /usr/local/etc/keepalived/keepalived.conf
+
+# 检查keepalived是否成功
+ip add  #看到虚拟IP的信息说明成功
+
+# 检查虚拟IP是否可连接（要找一个被授权了mysql用户的节点对该虚拟IP进行远程连接mysql服务，连成了就说明该虚拟IP是可用的。当然不一定是mysql服务，连其他服务也行，只要能证明连的这个虚拟IP其实是均衡1这个节点就行）
+mysql -h54.22.37.26 -uroot -pxxxxx
+
+# 这里只配置高可用，不指定haproxy服务的负载均衡
+
+================== 对均衡2的操作 ===============
+
+将上述操作重复一次即可。haproxy的配置内容一模一样。keepalived的配置内容则要做出一些改变，将MASTER字符串改为BACKUP,priority改为100即可。
+
+========================  Web应用的配置（以TP5为例） ======================
+最后,配置一下Web应用连接mysql集群，以TP5为例，配置其根目录下/config/database.php。
+
+此时database.php中，应该将主服务器填成主节点高可用集群的虚拟IP 54.22.37.25;
+将从服务器填成负载均衡节点高可用集群的虚拟IP 54.22.37.26
+
+我们可以将上一节的在204.175.124.51节点中设置的haproxy给关闭了，因为已经用不上了。
+
+现在从database.php中的配置上看，表面上主节点连的是 54.22.37.25 实际上连的是主1 54.22.37.21
+从节点表面上连的是 54.22.37.26 实际上连的是 均衡1 54.22.37.2
+
+<?php
+return [
+    // 数据库类型
+    'type'            => 'mysql',
+    // 服务器地址
+    'hostname'        => ["54.22.37.25",'54.22.37.26'],       # 将主节点改为虚拟IP
+    // 数据库名
+    'database'        => 'test',                            # 主节点和从节点的库名都是test
+    // 用户名
+    'username'        => ['zbpblog',"haproxy"],             # 主节点授权zbpblog给负载均衡节点,从节点授权haproxy用户给负载均衡节点
+    // 密码
+    'password'        => ['xxxxx',"xxxxx"],
+    // 端口
+    'hostport'        => ['3306','3300'],                   # 负载均衡节点的haproxy监听的是3300
+    // 连接dsn
+    'dsn'             => '',
+    // 数据库连接参数
+    'params'          => [],
+    // 数据库编码默认采用utf8
+    'charset'         => 'utf8',
+    // 数据库表前缀
+    'prefix'          => '',
+    // 数据库调试模式
+    'debug'           => true,
+    // 数据库部署方式:0 集中式(单一服务器),1 分布式(主从服务器)
+    'deploy'          => 1,                                 # 表示使用mysql分布式集群
+    // 数据库读写是否分离 主从式有效
+    'rw_separate'     => true,                              # 表示要读写分离,主库写,从库读
+    // 读写分离后 主服务器数量
+    'master_num'      => 1,                                 # 表示只有一个主节点,如果master_num>1,则默认前n个节点是主节点,其他为从节点
+    // 指定从服务器序号
+    'slave_no'        => [1],
+    // 自动读取主库数据
+    'read_master'     => false,
+    
+    //...
+];
+
+====================================================
+
+最后做测试，尝试关闭主1的mysql服务，看看是否还能写入数据。
+尝试关闭均衡1的keepalived服务，看看是否还能查到数据。
+
+
+这里注意，在关闭主1之后插入数据，发现查询到的数据不包含新插入的数据。
+原因是从1从2是对主1进行同步，而不是对主2进行同步。
+主1主2是主主复制但是要等到主1的mysql重启之后，主2新增的数据才能同步到主1，才能同步到从1从2。
+也就意味着，主1挂掉的这段期间所插入的新数据无法被查询到。
+主1重启了之后才能查询到。
+
+如果想解决这个问题，可以使用多源复制。
+我们知道，主从复制，从节点只能同步一个主节点。而多源复制则可以让一个从节点通过多个主节点的数据。
+多源复制是mysql 5.7 的新功能
+在这里不对多源复制多阐述，感兴趣的朋友可以网上查阅相关资料实现。

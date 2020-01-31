@@ -1,0 +1,149 @@
+主服务器1 204.175.124.51
+主服务器2 54.22.37.2
+目标：同步主服务器的test数据库（test库在204.175.124.51上），但不对其他数据库同步
+
+# 已知两台节点都已经开启binlog，而且在上一个实例中主节点1时主节点2的从节点；现在只需将54.22.37.2也变成主节点1的从节点，那么就实现了主主复制
+
+=============== 主节点1的操作 ================
+# 修改配置文件
+server-id=1
+log-bin=/var/lib/mysql/mysql-bin
+binlog_format=mixed
+relay-log=/var/lib/mysql/relay-bin
+relay-log-index=/var/lib/mysql/relay-bin.index
+expire_logs_days=7
+max_binlog_size=100M
+slave-skip-errors=all
+replicate-do-db=hst             # 上面这些配置都是上一个实例中做主从复制时设置的
+
+replicate-do-db=test            # 这个时做主主复制时添加的，节点1只同步节点2的test库
+
+# 授权用户给节点2：
+grant replication slave on *.* to "repl"@"54.22.37.2" identified by "xxxxx"
+
+# 重启服务
+
+# 再进入客户端
+show master status;  记录下File和position字段
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++------------------+----------+--------------+------------------+
+| mysql-bin.000008 |     4498 |              |                  |
++------------------+----------+--------------+------------------+
+
+
+=============== 主节点2的操作 ================
+# 尝试远程连接节点1，连接成功再做下面的操作
+
+# 先将test库备份到主节点2上面
+
+# 修改主节点2的配置文件，启动同步日志
+server-id=86                                    # server-id
+expire_logs_days	= 10                        # 二进制日志过期天数
+max_binlog_size   = 100M                        # 二进制日志最大的大小
+log-bin=/var/lib/mysql/mysql-bin                # 开启二进制日志，供从节点复制
+binlog_format=mixed                             # 二进制日志使用statement和row的混合模式
+
+replicate-do-db=test                            # 节点2作为从节点只同步test库
+relay-log=/var/lib/mysql/relay-bin              # 开启同步日志
+relay-log-index=/var/lib/mysql/relay-bin.index  # 指定同步日志的索引文件
+slave-skip-errors=all                           # 跳过同步过程中的sql错误
+
+# 重启服务
+
+# 进入客户端
+show master status;  记录下File和position字段
++------------------+----------+--------------+------------------+-------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++------------------+----------+--------------+------------------+-------------------+
+| mysql-bin.000006 |   997126 |              |                  |                   |
++------------------+----------+--------------+------------------+-------------------+
+
+
+# 开始同步节点1
+stop slave;
+reset slave;
+change master to master_host="204.175.124.51",master_user="repl",master_password="xxxxx",master_log_file="mysql-bin.000006",master_log_pos=4498;
+start slave 
+
+# 查看slave状态
+show slave status\G;
+
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 204.175.124.51
+                  Master_User: repl
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000008
+          Read_Master_Log_Pos: 4498
+               Relay_Log_File: relay-bin.000006
+                Relay_Log_Pos: 4695
+        Relay_Master_Log_File: mysql-bin.000008
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB: test
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 4498
+              Relay_Log_Space: 5195
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 1
+                  Master_UUID:
+             Master_Info_File: /var/lib/mysql/master.info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for more updates
+           Master_Retry_Count: 86400
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set:
+            Executed_Gtid_Set:
+                Auto_Position: 0
+         Replicate_Rewrite_DB:
+                 Channel_Name:
+           Master_TLS_Version:
+1 row in set (0.00 sec)
+
+
+====================== 回到节点1 =====================
+之前设置了节点1配置（添加了一个要同步的库test），应该不用再对节点1执行change master to 命令，因为重启节点1服务的时候应该会自动重新同步节点2的，为了确保节点1重新同步了节点2，可以查看
+
+show slave status;
+
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+Replicate_Do_DB: test,hst
+
+如果Slave_IO_Running，Slave_SQL_Running都是Yes，而且Replicate_Do_DB为test,hst，那说明已经同步好了
+不用再同步了。不然的话还得再同步一次。
+
+
+
+接下来进行测试，就是再节点1和节点2都插入一些数据看看是不是都有相应变化。
+
+此时 对于test库时主主复制，对于hst库是主从复制，即节点1同步节点2的hst库。

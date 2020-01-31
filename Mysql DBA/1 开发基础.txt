@@ -1,0 +1,657 @@
+1 开发基础
+
+1-1 变量
+
+用户变量:
+用户变量和连接有关,一个客户端定义的变量不会被其他客户端看到和使用,当客户端退出,该客户端定义的所有变量自动释放
+
+形式: @var_name
+
+set @变量名1=值,@变量名2=值,....
+
+例如:
+set @minMid = (select min(id) from user);
+
+系统变量:分为全局变量和会话变量;前者影响Mysql服务的整体运行,后者影响客户端连接的操作
+
+当服务器启动时,会将所有全局变量初始化为默认值,想更改全局变量,必须有super权限
+设置会话变量不用特殊权限,但只能更改自己客户端的会话变量
+
+所有客户端可以看到全局变量的更改,但是只有更改后再连接的客户可以看到更改后的全局变量;所以长连接或者连接池的客户端可能看不到其他客户端更改后的全局变量。
+
+全局变量和会话变量的修改和设置,以sort_buffer_size为例子
+
+全局变量:
+set global sort_buffer_size=value; 或者 set @@global.sort_buffer_size=value
+show  global variables like "sort_buffer_size"  或者 select @@global.sort_buffer_size
+
+会话变量:
+set session sort_buffer_size=value;  或者 set sort_buffer_size=value; 或者 set @@session.sort_buffer_size=value
+show variables like "sort_buffer_size"  或者 select @@session.sort_buffer_size 或者 select @@sort_buffer_size
+ 
+不指定 global和session时,默认是对会话变量操作
+
+
+
+1-2 基本的系统函数
+abs(x)
+ceil(x)
+floor(x)
+rand()
+sign(x)   返回正负符号
+truncate(x,d)   x是小数,d是保留的位数,d以后的位数舍弃
+round(x,d)  四舍五入
+
+char_length(x)  字符串字符长度
+length(x)    字符串字节长度
+concat(str1,str2,...)  字符串拼接
+left(x,len)    返回字符串len长度的字符
+right(x,len)   返回字符串len长度的字符,从右边开始
+
+now() 返回时间,格式是日期和时间
+unix_timestamp()   返回当前时间戳 秒
+curdate() 和 curtime()    以 yyyy-mm-dd和hh:ii:ss形式返回
+date_format(date,format)  时间和日期格式化,date形式如 YYYY-MM-DD  HH:MM:SS;  format形如%Y-%m-%d %H:%i:%S
+
+from_unixtime(unix_timestamp(),"%Y-%m-%d %H:%i:%S")  时间戳格式化
+
+1-3 索引
+索引的分类就不说了,已经知道了
+
+下面说一些关于索引的注意点:
+
+
+a 复合索引按最左前缀的原则筛选,例如
+create index idx_a_b_c on test (a,b,c);  #给a,b,c建立的索引
+
+where a=xxx
+where a=xxx and b=xxx 
+where a=xxx and b=xxx and c=xxx
+where a=xxx and c=xxx 
+where b=xxx and a=xxx
+
+前三种情况用到了索引,第四种只用到了a的索引,最后一种a和b都没用到索引
+
+如果where条件中同时有精确条件(=,in)和范围条件,那么靠左的列先使用了范围条件则靠右的列则用不到索引,因为mysql索引只支持一个而且是最近的范围索引:
+idx_a_b_c_d (a,b,c,d)
+
+where a=? and b=? and c>? and d<?
+
+a,b都没有使用范围条件,所以c会用到索引,但是c用了范围条件,所以d没用到索引
+
+where a>? and b=? and c=? and d<?
+
+a用到索引,b,c,d没用到
+
+所以范围查找尽可能放在最后
+
+优: select * from test where a=10 and b>50
+
+优: select * from test where order by a
+差: select * from test where order by b
+差: select * from test where order by c
+
+优: select * from test where a=10 order by a
+优: select * from test where a=10 order by b
+差: select * from test where a=10 order by c
+
+优: select * from test where a>10 order by a
+差: select * from test where a>10 order by b
+差: select * from test where a>10 order by c
+
+优: select * from test where a=10 and b=10 order by a
+优: select * from test where a=10 and b=10 order by b
+优: select * from test where a=10 and b=10 order by c
+
+优: select * from test where a=10 and b=10 order by a
+优: select * from test where a=10 and b>10 order by b
+差: select * from test where a=10 and b>10 order by c
+
+所以在建立复合索引的时候,越常用的字段放越左边,上面常用性是a>b>c所以,定义的时候是(a,b,c)
+
+
+
+
+b 如果一个 Like 语句的查询条件不以通配符起始则使用索引。
+如：%车 或 %车%   不使用索引。
+    车%              使用索引。
+    
+    
+    
+    
+c 使用函数
+如果没有使用基于函数的索引，那么where子句中对存在索引的列使用函数时，会使优化器忽略掉这些索引。下面的查询就不会使用索引：
+
+Sql代码  收藏代码
+select * from staff where trunc(birthdate) = '01-MAY-82';  
+ 
+但是把函数应用在条件上，索引是可以生效的，把上面的语句改成下面的语句，就可以通过索引进行查找。
+
+Sql代码  收藏代码
+select * from staff where birthdate < (to_date('01-MAY-82') + 0.9999);  
+
+
+
+
+d 比较不匹配的数据类型
+比较不匹配的数据类型也是难于发现的性能问题之一。
+下面的例子中，dept_id是一个varchar2型的字段，在这个字段上有索引，但是下面的语句会执行全表扫描。
+
+Sql代码  收藏代码
+select * from dept where dept_id = 900198;  
+ 
+这是因为oracle会自动把where子句转换成to_number(dept_id)=900198，就是3所说的情况，这样就限制了索引的使用。
+把SQL语句改为如下形式就可以使用索引
+
+Sql代码  收藏代码
+select * from dept where dept_id = '900198';  
+
+
+
+e 索引列的范围查找
+如果某列定义了索引,对该列使用 where between and / > / < 也是会使用到索引的,会用到索引范围查找;但是如果这个范围太大,数据库觉得成本太高，可能会变成全表索引。
+
+f 一个常识 对经常作为搜索条件(where),经常排序(order),经常分组(group by) 的字段建立索引能提高效率
+如果作为索引的字段有越多相同的值,那么这个索引的效率越低
+
+g 关于多表联查时使用到的索引的情况
+在多表联查的时候，数据库会指定一个表为驱动表，另一个表为被驱动表
+
+如下：
+select a.col1,b.col2 from a join b on a.id=b.id 
+
+其中id是两个表的主键,如果a表被判定为驱动表,那么数据库可能会全表扫描a表,并用a表的每个id探测b表的索引查找匹配的记录。
+
+那么我们先了解在join连接时哪个表是驱动表，哪个表是被驱动表：
+1.当使用left join时，左表是驱动表，右表是被驱动表
+2.当使用right join时，右表时驱动表，左表是驱动表
+3.当使用join时，mysql会选择数据量比较小的表作为驱动表，大表作为被驱动表，我们知道如果大表做驱动表，会全表扫描驱动表，那么就会效率很低。也就是说join的情况下，数据库会自动做优化。
+
+join查询中，永远是以小表驱动大表。
+
+
+例如: A是小表，B是大表
+　　使用left join 时，则应该这样写select * from A a left join B b on a.code=b.code
+　　A表时驱动表，B表是被驱动表
+
+测试：A表140多条数据，B表20万左右的数据量
+　　select * from A a left join B b on a.code=b.code
+　　执行时间：7.5s
+
+　　select * from B b left join A a on a.code=b.code
+　　执行时间：19s
+
+结论：小表驱动大表优于大表驱动小表
+
+join查询在有索引条件下
+　　驱动表有索引不会使用到索引
+　　被驱动表建立索引会使用到索引
+
+在以小表驱动大表的情况下，再给大表建立索引会大大提高执行速度
+
+在我做的一个项目中有个查询,这个查询涉及到两张表:分类表和文章表
+分类表 type 有20条数据,文章表 arts 有70万条数据,文章表有一个字段是is_send,用来标记文章是否发送,is_send字段的值只有两个。我想查每个分类下有多少篇文章
+
+select t.id,t.name,count(*) as arts_count from arts a join type t on a.tid=t.id group by t.id;
+ 
+我在arts中对tid也做了索引
+
+上面使用了join所以,默认以type作为驱动,而且分组的对象t.id是主键,主键肯定也是做了索引的,所以上面的查询效率不会低,只花了1秒
+
+但是如果加了一个条件 is_send=0
+select t.id,t.name,count(*) as arts_count from arts a join type t on a.tid=t.id where is_send=0 group by t.id;
+
+那么,查询时间变成了12秒
+
+原因是is_send没有建立索引,所以以他为条件会对arts表全表扫描;
+更关键的是is_send只有0和1两个值,所以即使对它建立了索引,效率也只能提高一半,而且还是0和1分布比较均匀的情况下才能提高一半,如果0占百分之90,1占百分之10,那么where is_send=0 提高的效率不到百分之10。
+
+h 基于主键来取数据是最快的,基于二级索引(即普通的 index)则要进行两次索引查找,先找到二级索引再根据二级索引找到主键,再根据主键找到对应的记录
+
+i 避免重复对一个列创建多个索引,这样会浪费空间,而且对一个列创建多个索引不会报错
+
+j 使用覆盖索引可以大大提高性能
+覆盖索引指所有数据可以从索引中得到,不需要去读取物理记录。例如
+idx_a_b_c 
+
+select a,b from tb1 where a=? and b=? and c=?
+
+这就是覆盖索引,也避免了二次索引查找
+
+k 利用索引排序
+
+mysql有两种方式可以产生有序的结果:一种是文件排序(filesort)对记录排序,另一种是扫描有序的索引排序
+
+文件排序,mysql是将取得的数据在内存中排序,如果对少量数据进行排序会很快,但如果是对大量数据排序就会很慢
+
+order by create_time 就是文件排序
+order by id 就是索引排序
+
+但是之前做项目,都是对分页数据排序,每一页不超过100条数据,所以用文件排序也不慢
+
+像复合索引在排序的时候也要遵循前导列和最左前缀原则,否则就不算索引排序
+idx_a_b_c
+
+order by a,b,c
+where a=? and b=? order by c
+
+这两个都复合索引排序
+
+可以通过 explain 的extra查看是否是文件索引,显示filesort就是文件索引
+
+l 避免冗余索引
+冗余索引就是:
+我定义了a字段为索引,有定义了(a,b)的复合索引
+
+但是有一种情况是要定义冗余索引:比如原本我对a建立了索引,a是一个整型列,如果我突然想将a索引扩展为a,b索引,而b是一个长度较长的字符串列,那么索引会很大。此时就不得不添加一个新的复合索引，保留原本的索引
+
+M 使用更短的索引
+
+比如 我想对文章的标题建立索引，标题会很长，此时建立的索引会很大（我们知道建立索引会将索引字段单独放到一个表中存储），为此我们可以使用前缀索引，即只对标题的前多少个字符进行索引
+
+index title (title(6))
+
+就是只对标题的前6个字符进行索引,这样存进索引表的就不是整个标题而是标题的前6个字符
+
+但是要确保所选择的前缀的长度的内容大部分值是唯一的
+
+n where不以索引字段为条件时会全表扫描;
+where以索引为条件时,如果索引效率不高时,mysql依旧会全表扫描;
+所以不要对不必要的字段建立索引,例如性别
+
+o innodb的主键不能太长,以防止二级索引过大。主键一般都是选整型
+
+p 多表联查中,连接单列比多列快,连接整数列比其他数据类型的列快很多
+
+q Innodb的普通索引(我们知道索引会单独存放到一个文件中)储存了主键的值,所以主键如果用字符串,就会增加索引文件的占用空间
+
+r 聚簇索引和非聚簇索引
+聚簇索引是对磁盘上实际数据重新组织以按指定的一个或多个列的值排序的算法。特点是存储数据的顺序和索引顺序一致。一般情况下主键会默认创建聚簇索引，且一张表只允许存在一个聚簇索引（理由：数据一旦存储，顺序只能有一种）。
+
+s 我们说建立索引的字段的值要尽量不同这个索引的效率才高。但是有一种情况是某字段的值有很多相同的，但是同样要建立索引的，那就是要分组和排序的字段。
+像文章分类字段，分类不超过20，但是建立索引可以在使用分类进行分组的时候效率大大提高。
+
+select arts.tid,count(*) art_num group by tid;
+此时,是否对tid建立索引扫描的条数都是一样的,但是使用explain时他的type列一个是index(使用索引)一个是all(全表扫描),所以建立了索引的tid来分组其速度会比没建立索引的快无数倍
+
+
+innodb的次索引指向对主键的引用  (聚簇索引)
+myisam的次索引和主索引   都指向物理行 (非聚簇索引)
+
+怎么理解呢,意思是,对于myisam,他的主键索引和普通索引都是直接指向数据表记录的,你使用主键或者普通索引作为条件来查询,他都是直接找到其指向的对应的行返回给你
+但是对于innodb,他的主键是指向数据表记录,而普通索引指向主键,所以如果想以普通索引查找记录他会先找到对应的主键,再根据主键找到对应的记录。innodb的主键索引（文件）及储存了索引值，又在叶子中储存了行的数据，像这种结构就是聚簇索引。聚簇索引的主键值,应尽量是连续增长的值,而不是随机值,(不要用随机字符串或UUID)
+innodb如果没有主键,会以一个唯一非空键作为簇索引,没有唯一非空键会创建一个隐含的主键作为簇索引
+
+生产环境中数据库出现性能问题,80%是索引策略导致的,表结构不易变动,但通过调整索引和SQL可以很快解决问题
+
+
+1-4 使用explain工具
+
+explain是mysql的执行计划查看工具，用于分析一个查询语句的性能
+
+三种格式如下：
+
+explain select ...
+
+explain extended select ...   #该命令将执行计划反编译成select语句,运行 show warnings 可以得到被mysql优化后的查询语句
+
+explain partitions select...
+该命令用于分区表的explain命令
+
+explain 命令的输出有以下字段
+id| select_type | table | type | possible_keys | key | key_len | ref | rows | Extra    
+
+下面详细叙述explain输出的各项内容:
+
+a id 
+表示查询中执行select子句或操作表的顺序
+
+id为几就代表是第几个select
+
+如果id相同,则执行的循序由上到下,例如 
+mysql> explain select t.id,t.name,count(*) as arts_count from arts a join type t
+ on a.tid=t.id where is_send=0 group by t.id\G;
+*************************** 1. row ***************************
+           id: 1
+  select_type: SIMPLE
+        table: t
+   partitions: NULL
+         type: ALL
+possible_keys: PRIMARY
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 9
+     filtered: 100.00
+        Extra: Using temporary; Using filesort
+*************************** 2. row ***************************
+           id: 1
+  select_type: SIMPLE
+        table: a
+   partitions: NULL
+         type: ref
+possible_keys: tid
+          key: tid
+      key_len: 5
+          ref: art.t.id
+         rows: 978
+     filtered: 10.00
+        Extra: Using where
+2 rows in set, 1 warning (0.00 sec)
+
+他们的id相同,所以执行顺序是第一行中的表再是第二行中的表
+
+如果id不同,id大的优先级高,先被执行
+
+
+b select_type 
+表示每个查询的类型,有一下几种类型:
+simple,primary,subquery,derived,union unoim result
+
+simple : 查询中不包括子查询或union查询的类型,简单类型
+primary: 查询中若包含任何复杂的子部分,则最外层查询被标记为primary
+subquery:select或where后包含了子查询,则标记为subquery
+derived: from后包含了子查询则标记为derived
+
+从 union 表中获取结果的select标记为 union result
+
+第二个select出现在union之后被标记为union ,也就是union之后的select是Union类型,但union之前的那个select不是union而是primary,整个union语句是一个union result
+如 : select * from a union select * from b  #这也是最常规的 union 联合查询
+
+若union包含在from子句的子查询中,则外层select被标记为derived
+
+例如:
+explain select id,title from arts where id<1500  union select id,title from arts where id>70000 \G;
+*************************** 1. row ***************************
+           id: 1
+  select_type: PRIMARY
+        table: arts
+   partitions: NULL
+         type: range
+possible_keys: PRIMARY
+          key: PRIMARY
+      key_len: 4
+          ref: NULL
+         rows: 394
+     filtered: 100.00
+        Extra: Using index condition
+*************************** 2. row ***************************
+           id: 2
+  select_type: UNION
+        table: arts
+   partitions: NULL
+         type: range
+possible_keys: PRIMARY
+          key: PRIMARY
+      key_len: 4
+          ref: NULL
+         rows: 2612
+     filtered: 100.00
+        Extra: Using index condition
+*************************** 3. row ***************************
+           id: NULL
+  select_type: UNION RESULT
+        table: <union1,2>
+   partitions: NULL
+         type: ALL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: NULL
+     filtered: NULL
+        Extra: Using temporary
+3 rows in set, 1 warning (0.00 sec)
+
+
+又例如:
+explain select d1.name,(select id from t3) d2 from (select id,name from t1 where other_column="") d1 union (select name,id from t2);
+
+得到结果如下
+
+id  select_type     table
+1   primary         <derived3>
+3   derived         t1
+2   subquery        t3
+4   union           t2
+null union result   <union1,4>
+
+第一行:id为1,表示它是第一个select,select_type为primary表示该查询是一个外层查询,table列是<drived3>表示查询结果来自于一个衍生表,其中3代表这个该查询衍生来自第3个select,即id为3的select
+
+第二行:id为3,是第三个select,因为查询语句是在from之中,所以是derived
+
+第三行:id为2,第二个select是作为子查询
+
+第四行:id为4,查看第四个select,在union关键字后面,它是union类型且它是最先执行的
+
+第五行:id为null 表示它是一个临时表,没有select,它代表的是整个语句,table列的<union1,4>表示它是对第一个和第四个select的结果的union操作
+
+
+c type 
+在表中找到所需行的方式,又叫访问方式:
+有如下类型:
+all/index/range/ref/eq_ref/const,system/null 
+
+all 全表扫描,当不使用where条件进行查询或者使用where但是作为条件的字段不是索引字段则为全表扫描
+
+index 查询的字段只有主键,而且是获取所有行的主键的情况,不能有where,如 select id from t1;
+
+range 索引范围扫描,where条件是索引而且是范围搜索的情况,如 select * from t1 where id>10;  还有in,between and ;如果搜索条件不是索引为条件,就会变成全表扫描
+
+ref 非唯一性索引扫描 即使用普通索引或者唯一索引的非唯一前缀作为where条件搜索
+例如:
+我设置了一个文章表的tid字段(分类id)为普通索引
+explain select * from arts where tid=6;
+
++----+-------------+-------+------------+------+---------------+------+---------
++-------+------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len
+| ref   | rows | filtered | Extra |
++----+-------------+-------+------------+------+---------------+------+---------
++-------+------+----------+-------+
+|  1 | SIMPLE      | arts  | NULL       | ref  | tid           | tid  | 5
+| const | 2189 |   100.00 | NULL  |
++----+-------------+-------+------------+------+---------------+------+---------
++-------+------+----------+-------+
+
+explain select * from arts where title="新闻标题"; 
+此时的 type 是 all 全表扫描
+
+explain select t.name,arts.*  from arts join type t on arts.tid=t.id;       #对文章表和分类表进行多表联查
+
++----+-------------+-------+------------+------+---------------+------+---------
++----------+-------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len
+| ref      | rows  | filtered | Extra |
++----+-------------+-------+------------+------+---------------+------+---------
++----------+-------+----------+-------+
+|  1 | SIMPLE      | t     | NULL       | ALL  | PRIMARY       | NULL | NULL
+| NULL     |     9 |   100.00 | NULL  |
+|  1 | SIMPLE      | arts  | NULL       | ref  | tid           | tid  | 5
+| art.t.id | 24064 |   100.00 | NULL  |
++----+-------------+-------+------------+------+---------------+------+---------
++----------+-------+----------+-------+
+
+结果对分类表是全表扫描,对文章表是索引扫描
+
+explain select * from arts where tid>6;   # 此时的type就变为range了
+
+
+eq_ref 唯一性索引扫描,对于每个索引键,表中只有一条记录与之匹配。常用于主键和唯一索引扫描。
+
+const、system 当mysql对查询进行优化并转化为一个常量的时候type就是const类型,例如使用主键或者唯一键作为where的条件查询,此时mysql会将这个查询结果转化为一个常量。system是const的一个特例，当查询的表只有一行数据的时候，type就是system类型
+
+例如：
+explain select * from arts where id=1300;    #type 为const
+
+null Mysql 在优化过程中分解语句,查询时甚至不用访问表或者索引
+例如:
+explain select max(id) from arts;
+explain select count(*) from arts;
+
+
+
+d possible_keys 指出mysql可以使用哪个索引在表中找到行,涉及到若字段上存在索引则索引会被列出,但不一定会被查询用到
+
+e key 显示在查询中实际使用到的索引
+如:
+explain select title from arts where id=750000;
+
+如果 要查询的字段就是这个索引则 key 为该索引字段名,但possible_keys为null
+select id from arts
+
+f ref 多表联查时的连接匹配条件
+
+g rows 是估算执行这条语句需要扫描的记录数
+例如 我的arts表有60多万条数据,我的tid字段有建立索引的
+
+explain select * from arts where tid=6;
+
+结果 rows为325186 ,要扫描三十多万条
+
+当我删除tid索引的时候再执行:
+rows: 614436   变成扫描60多万跳,变成了全表扫描
+
+所以查看性能 rows是很重要的一个指标,而建立索引和使用where的范围查询可以减少扫描的行数
+
+如果用主键来查,发现rows只有1而已
+
+但其实,不一定扫描的行数越少就查的越快,例如
+我这个表有60万+的数据
+select title from arts where tid=6 and id>500000
+select title from arts where id>500000 and tid=6;
+select title from arts where id in (select id from arts where id>500000) and tid=6;
+
+这前两条显示的rows都是311430,第三条显示的是203329和1,但是第一个用了40s,第二个用了16s,第三个只用了1.3秒,他们的结果是一样的
+
+这是因为子查询查的字段是主键id,又是根据主键范围为条件查的,所以会非常快,只花了0.1秒,而外层查询又是根据主键id和索引tid查的,所以也是飞快。
+
+这里说一下
+select title from arts where id>500000
+select id from arts where id>500000
+
+这两句的条件都是用主键进行范围查询，扫描的条数也相同，但前者花了3.5秒，后者花了0.1秒而已，只因为查询的字段后者是主键。
+同样说明不一定扫描行数不一定是越少就越快
+
+
+h Extra 包含不适合在其他列显示但非常重要的信息，有以下4中：
+
+Using Index 表示相应的select查询使用了覆盖索引;覆盖索引就是包含满足查询需要的所有数据的索引
+
+Using where 表示mysql在存储引擎收到记录后进行"后过滤",并不是说查询语句中使用了where就会有Using where
+explain select id from arts where id>500000;   # 显示了Using where 
+explain select * from arts where id>500000;   # 没有显示Using where 
+
+Using temporary 表示使用了临时表来存储结果集,常用于排序和分组查询;如果同时出现了Using temporary和Using filesort 则性能是不佳的,这种情况出现在使用非索引字段分组的情况
+explain select title from arts where id>600000 group by is_send desc;
++------+-------------+-------+-------+---------------+---------+---------+------+--------+--------------------------------------------------------+
+| id   | select_type | table | type  | possible_keys | key     | key_len | ref  | rows   | Extra                                                  |
++------+-------------+-------+-------+---------------+---------+---------+------+--------+--------------------------------------------------------+
+|    1 | SIMPLE      | arts  | range | PRIMARY       | PRIMARY | 4       | NULL | 122818 | Using index condition; Using temporary; Using filesort |
++------+-------------+-------+-------+---------------+---------+---------+------+--------+--------------------------------------------------------+
+
+
+explain select title from arts group by id desc;
++------+-------------+-------+------+---------------+------+---------+------+--------+----------------+
+| id   | select_type | table | type | possible_keys | key  | key_len | ref  | rows   | Extra          |
++------+-------------+-------+------+---------------+------+---------+------+--------+----------------+
+|    1 | SIMPLE      | arts  | ALL  | NULL          | NULL | NULL    | NULL | 614436 | Using filesort |
++------+-------------+-------+------+---------------+------+---------+------+--------+----------------+
+
+
+Using filesort 文件排序,mysql将无法利用到索引的排序操作成为文件排序,所以出现Using filesort比不出现Using filesort的性能差
+
+select sql_no_cache title from arts where id>500000 order by create_time desc;      # Using index condition; Using filesort 用了3秒多
+explain select sql_no_cache title from arts where id>700000 order by id desc;       # Using where; 用了1秒多
+
+所以尽可能使用索引排序
+
+
+PS: Explain不会告诉你关于触发器,存储过程的信息或者用户自定义函数对查询的性能影响情况
+    Explain不会考虑缓存因素
+    Explain不会显示mysql在查询中所做的优化
+    部分统计信息是估算的,不准确
+    如果有子查询或者使用了临时表的视图,使用explain的开销会很大
+
+
+    
+    
+    
+关于查询缓存:
+假如我在一个有50万+的数据表中做了一个全表扫描的查询,如:
+select * from arts where title="LFxm：好圆兑日元跌脱11闭怀";
+
+此时,我们知道,这样的查询时间会非常的长,在我的服务器上大概用了7秒多,但是当我们第二次做出相同的查询:
+select * from arts where title="LFxm：好圆兑日元跌脱11闭怀";
+
+发现只用了1秒的时间
+
+后来发现原来是数据库默认使用了查询缓存,下面说一下查看是否开启查询缓存和如何开启:
+
+查看:
+show variables like "%query_cache%";
+
++------------------------------+---------+
+| Variable_name                | Value   |
++------------------------------+---------+
+| have_query_cache             | YES     |
+| query_cache_limit            | 1048576 |
+| query_cache_min_res_unit     | 4096    |
+| query_cache_size             | 0       |
+| query_cache_strip_comments   | OFF     |
+| query_cache_type             | ON      |
+| query_cache_wlock_invalidate | OFF     |
++------------------------------+---------+
+
+如果 query_cache_type(是否开启缓存) 为 on 而且 query_cache_size(表示为查询缓存预留的内存) 不为0 则查询缓存就是开启了的
+
+可以通过query_cache_type来控制缓存的开关， query_cache_type的状态值有如下几种：
+
+0(OFF)：代表不使用缓冲；
+1(ON)：代表使用缓冲；
+2(DEMAND)：代表根据需要使用；
+
+默认 query_cache_type为on,query_cache_size为0
+
+修改query_cache_size
+SET GLOBAL query_cache_size = 134217728;    # 128M 的内存用来存这个缓存
+注意上面的值如果设得太小不会生效。比如我用下面的SQL设置query_cache_size大小： 
+SET GLOBAL query_cache_size = 4000;
+这个值必须是1024的整数倍。否则，mysql实际分配的数据会和你指定的不同。
+
+query_cache_limit
+mysql能够缓存的最大查询结果。如果查询结果大于这个值，则不会被缓存。缺省为1M。因为查询缓存在数据生成的时候就开始尝试缓存数据，所以只有当结果全部返回后，mysql才知道查询结果是否超出限制。
+如果超出，mysql则增加状态值Qcache_not_cached，并将结果从查询缓存中删除。
+如果你事先知道有很多这样的情况发生，那么建议在查询语句中加入SQL_NO_CACHE来避免查询缓存带来的额外消耗。
+
+mysql 缓存的是查询的结果,就是数据。如果想要用到缓存，必须执行的语句和上一次执行的语句一样，而且该语句的结果和上一次查询的结果一致，也就意味着，如果这条数据做出了update，则缓存会失效。如果有的大量的修改和查询时，由于修改造成的cache失效，会给服务器造成很大的开销。
+
+
+缓存数据何时失效（invalidate）
+在表的结构或数据发生改变时，查询缓存中的数据不再有效。有这些INSERT、UPDATE、 DELETE、TRUNCATE、ALTER TABLE、DROP TABLE或DROP DATABASE会导致缓存数据失效。所以查询缓存适合有大量相同查询的应用，不适合有大量数据更新的应用。
+
+a) 一旦表数据进行任何一行的修改，基于该表相关cache立即全部失效。
+b) 为什么不做聪明一点判断修改的是否cache的内容？因为分析cache内容太复杂，服务器需要追求最大的性能。
+
+
+可以使用下面三个SQL来清理查询缓存： 
+1、FLUSH QUERY CACHE; // 清理查询缓存内存碎片。
+2、RESET QUERY CACHE; // 从查询缓存中移出所有查询。
+3、FLUSH TABLES; //关闭所有打开的表，同时该操作将会清空查询缓存中的内容。
+
+性能
+a) cache 未必所有场合总是会改善性能
+当有大量的查询和大量的修改时，cache机制可能会造成性能下降。因为每次修改会导致系统去做cache失效操作，造成不小开销。
+另外系统cache的访问由一个单一的全局锁来控制，这时候大量>的查询将被阻塞，直至锁释放。所以不要简单认为设置cache必定会带来性能提升。
+b) 大result set不会被cache的开销
+太大的result set不会被cache, 但mysql预先不知道result set的长度，所以只能等到reset set在cache添加到临界值 query_cache_limit 之后才会简单的把这个cache 丢弃。这并不是一个高效的操作。如果mysql status中Qcache_not_cached太大的话, 则可对潜在的大结果集的sql显式添加 SQL_NO_CACHE 的控制。
+
+如果query_cache_type为1而又不想利用查询缓存中的数据
+可以用下面的SQL： 
+SELECT SQL_NO_CACHE * FROM my_table WHERE condition;
+
+如果值为2，但想要使用缓存
+需要使用SQL_CACHE开关参数：
+SELECT SQL_CACHE * FROM my_table WHERE condition;
+
+用 show status like 'Qca%'; 可以查看缓冲的情况。

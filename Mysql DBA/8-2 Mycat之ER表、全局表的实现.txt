@@ -1,0 +1,221 @@
+任务1：实现ER表+多表联查
+
+任务条件：
+两个表 产品表 product 和 产品分类表 type
+create table product(
+    id int unsigned primary key auto_increment,
+    name varchar(255),
+    price decimal(10,2),
+    type_id int     # 商品分类类型
+)engine=innodb;
+
+create table type(
+    id int unsigned primary key auto_increment,
+    type_name varchar(255)
+)engine=innodb;
+
+1.要求在product中type_id和type表中的id相同的数据要放在同一个分片节点中以避免跨分区关联查询。
+2.使用3个分片节点,3个分片节点在一台主机上。
+3.使用取模算法切分。
+
+----------------------
+A. 配置schema.xml
+
+<schema name="test" checkSQLschema="true" sqlMaxLimit="100" randomDataNode="dn1,dn2,dn3">
+    <table name="type" primaryKey="id" dataNode="dn4,dn5,dn6" rule="mod-long2">
+        <childTable name="product" primaryKey="id" joinKey="type_id" parentKey="id"></childTable>
+    </table> 
+</schema>
+
+<!-- 这3个分片节点用于测试ER表而创 -->
+<dataNode name="dn4" dataHost="host2" database="db1"></dataNode>
+<dataNode name="dn5" dataHost="host2" database="db2"></dataNode>
+<dataNode name="dn6" dataHost="host2" database="db3"></dataNode>
+
+<dataHost name="host2" maxCon="1000" minCon="10" balance="0" writeType="0" dbType="mysql" dbDriver="native" switchType="-1" slaveThreshold="100">
+    <heartbeat>select user()</heartbeat>
+    <writeHost host="hostM2" url="127.0.0.1:3306" user="root" password="xxx"></writeHost>
+</dataHost>
+
+# 上面dataHost的配置中，设置balance="0" 不进行读写分离，是因为只有一台主机hostM2，所以读不读写分离无所谓。
+switchType="-1" 不自动切换，因为只有一台主机
+writeType="0" 是指往第一台主机写，也是因为只有一台主机
+
+
+B. 配置server.xml,创建用户操作schema
+<user name="u1">
+    <property name="password">xxxxx</property>
+    <property name="schemas">test</property>
+</user>
+
+C. 配置rule.xml
+
+<tableRule name="mod-long2">
+    <rule>
+        <columns>id</columns>           #以type表的id作为分区字段
+        <algorithm>mod-long2</algorithm>
+    </rule>
+</tableRule>
+
+<function name="mod-long2" class="io.mycat.route.function.PartitionByMod">
+    <property name="count">3</property>     # 表示只有3个分区表，切分成3部分
+</function>
+
+
+
+重启mycat
+
+# 登录hostM2的mysql服务，创建db1~3数据库：(请先确保已设置表名忽略大小写)
+set character_set_server=utf8;
+create database db1;
+create database db2;
+create database db3;
+
+# 本地登录mycat
+mysql -h204.175.124.51 -uu1 -P8066 -pxxxxx
+
+# 创建product和type表
+
+use test
+
+create table product(
+    id int unsigned primary key auto_increment,
+    name varchar(255),
+    price decimal(10,2),
+    type_id int     # 商品分类类型
+)engine=innodb;
+
+create table type(
+    id int unsigned primary key auto_increment,
+    type_name varchar(255)
+)engine=innodb;
+
+
+先往type插入数据
+insert into type (id,type_name) values (1,"t1");    # 在db2
+insert into type (id,type_name) values (2,"t2");    # 在db3
+insert into type (id,type_name) values (3,"t3");    # 在db1
+insert into type (id,type_name) values (4,"t4");    # 在db2
+insert into type (id,type_name) values (5,"t5");    # 在db3
+
+在往product插入数据
+insert into product (id,name,price,type_id) values (1,"p1",50,1);   # 在db2
+insert into product (id,name,price,type_id) values (2,"p2",50,2);   # 在db3
+insert into product (id,name,price,type_id) values (3,"p3",50,3);   # 在db1
+insert into product (id,name,price,type_id) values (4,"p4",50,4);   # 在db2
+insert into product (id,name,price,type_id) values (5,"p5",50,4);   # 在db2
+
+发现type_id和type的id相同的product与type数据都在同一个分片节点中。
+其实对type的id设置使用取模算法是，会对product的type_id采取相同的取模算法，这样才保证了type_id和type的id相同的product与type数据在同一个分片节点中。
+
+
+
+
+
+
+
+=================================================
+
+
+
+
+
+
+任务2：实现全局表
+
+任务条件：
+还是上面两个表 产品表 product 和 产品分类表 type
+
+1.product是大表；type是小表，只有固定的6种分类；要求对上面两张表进行合理切分，避免跨分区关联查询。
+2.使用3个分片节点,3个分片节点在一台主机上。
+3.使用分片枚举算法。
+
+----------------------------------
+
+由于type是小表，而且只有固定的6中分类，即数据不经常变换，所以可以对type表进行全局表设置。
+以product表的type_id为分区字段
+
+如下：
+配置schema.xml
+<schema name="test" checkSQLschema="true" sqlMaxLimit="100" randomDataNode="dn1,dn2,dn3">
+    <table name="type" primaryKey="id" dataNode="dn4,dn5,dn6" type="global"></table> 
+    <table name="product" primaryKey="id" dataNode="dn4,dn5,dn6" rule="sharding-by-intfile2"></table>
+</schema>
+
+<dataNode name="dn4" dataHost="host2" database="db1"></dataNode>
+<dataNode name="dn5" dataHost="host2" database="db2"></dataNode>
+<dataNode name="dn6" dataHost="host2" database="db3"></dataNode>
+
+<dataHost name="host2" maxCon="1000" minCon="10" balance="0" writeType="0" dbType="mysql" dbDriver="native" switchType="-1" slaveThreshold="100">
+    <heartbeat>select user()</heartbeat>
+    <writeHost host="hostM2" url="127.0.0.1:3306" user="root" password="xxxxx"></writeHost>
+</dataHost>
+
+
+# 设置了type="global"的<table>标签无需设置rule算法
+
+
+配置rule.xml
+
+<tableRule name="sharding-by-intfile2">
+    <rule>
+        <columns>type_id</columns>              # 以type_id为分区字段
+        <algorithm>hash-int2</algorithm>
+    </rule>
+</tableRule>
+<function name="hash-int2"
+          class="io.mycat.route.function.PartitionByFileMap">
+    <property name="mapFile">partition-hash-int2.txt</property>
+    <property name="defaultNode">0</property>       # 设置如果product中有超过范围的type_id则该数据会默认插入第一个节点。如果不设置则插入超出范围的type_id的数据会报错。
+</function>
+
+partition-hash-int2.txt 如下： 
+
+# type为1,4放到节点1，type为2,5放到节点2，type为3,6放到节点3
+1=0
+4=0
+2=1
+5=1
+3=2
+6=2
+
+
+重启mycat
+
+
+创建db1~3数据库，并插入几条数据：
+insert into type (id,type_name) values (1,"t1");
+insert into type (id,type_name) values (2,"t2");
+insert into type (id,type_name) values (3,"t3");
+insert into type (id,type_name) values (4,"t4");
+insert into type (id,type_name) values (5,"t5");
+insert into type (id,type_name) values (6,"t6");
+
+# 创建6个分类
+insert into product (id,name,price,type_id) values (1,"p1",10,1);
+insert into product (id,name,price,type_id) values (2,"p4",30,4);
+insert into product (id,name,price,type_id) values (3,"p12",30,5);
+insert into product (id,name,price,type_id) values (4,"p62",30,6);
+insert into product (id,name,price,type_id) values (4,"p62",30,7);
+
+
+# 超出范围的type_id的数据会插入到第一个节点dn4
+explain select * from product where type_id=7;
++-----------+---------------------------------------------------+
+| DATA_NODE | SQL                                               |
++-----------+---------------------------------------------------+
+| dn4       | SELECT * FROM product WHERE type_id = 7 LIMIT 100 |
++-----------+---------------------------------------------------+
+
+# 进行多表联查
+explain select * from type t join product p on p.type_id=t.id where type_id=4;
++-----------+-----------------------------------------------------------------------+
+| DATA_NODE | SQL                                                                   |
++-----------+-----------------------------------------------------------------------+
+| dn4       | select * from type t join product p on p.type_id=t.id where type_id=4 |
+| dn5       | select * from type t join product p on p.type_id=t.id where type_id=4 |
+| dn6       | select * from type t join product p on p.type_id=t.id where type_id=4 |
++-----------+-----------------------------------------------------------------------+
+
+虽然这里显示的是要查dn4,5,6这三个分片，其实只用查dn4这个分片就行。
+因为尝试将 dn5,dn6 的type数据清空，执行select * from type t join product p on p.type_id=t.id where type_id=4;依旧可以查到数据。

@@ -1,0 +1,438 @@
+对数据库效率的影响因素：
+
+1.sql的查询速度
+2.服务器硬件
+3.网卡流量
+4.磁盘IO
+5.大表和大事务
+
+第一个因素的影响因素：
+a.QPS过高
+QPS：是每秒处理的查询量
+假如服务器只有一个服务器
+10毫秒(ms)可以处理1个sql
+那么1s可以处理100个sql
+所以QPS<=100
+
+如果1秒内要处理的sql过多，会降低sql的处理效率
+
+b.
+大量并发量和超高的CPU使用率
+前者导致数据库连接数被占满
+数据库的配置中有设置默认最大连接数的
+max_connection
+
+所以如果大并发，会导致超过最大连接数的用户的sql在等待执行
+就会慢
+
+后者会因为CPU资源耗尽而宕机
+
+第二个因素：
+风险是网卡IO被沾满
+可以进行分级缓存、避免select *和减少从服务器的数量来解决
+
+第四个因素的影响因素：
+磁盘IO性能突然下降，此时只能通过更换磁盘来解决
+
+
+第五个因素：
+大表就是记录数超过1000万行
+或者说表文件超过10G的大小的表
+
+大表会降低查询的速度，因为数据多，要从很多数据找一条或几条的数据很慢
+
+大表建立索引也会需要很长的时间
+如果mysql 小于5.5就会被锁表
+大于5.5不会锁表但是会引起主从延迟
+
+还有修改表结构需要长时间锁表会影响数据操作比如增删改不能进行
+直到表结构改完才行
+
+如何处理：
+分库分表，将大表分成多个小表
+难点在于主键的选择
+
+或者进行历史数据归档，归档的都是很少用到的数据
+比如一两年前的数据
+
+
+下面了解一下磁盘的结构和数据存储过程
+系统将数据的逻辑地址传递给磁盘，磁盘控制电路将逻辑地址翻译成物理地址
+找到磁盘的柱面，将磁头定位到磁道上
+传递数据将数据传送给内存
+
+接下来正式说mysql优化
+1.结构优化：
+a.表结构设计
+先是3范式，原子性(不可拆分)、唯一性(不能有完全相同数据)和无冗余性
+原子性的不可拆分意思是要将数据拆成不能再拆，比如地址，xx省xx市xx县xx详细地址
+此时要拆成省市县详细地址的4个字段才行
+
+无冗余性，比如订单表有没有必要添加商品总价字段，没有，
+因为这个是可以算出来的，所以这是个冗余字段
+
+b.字段
+设计表的时候需要选择字段，字段的类型有限选择
+数字>时间>字符串
+
+字段大小够用即可，不要过大，比如密码32位即可，年龄tinyint即可
+
+表拆分，就是比如用户所有信息不要放一张表，常用的放一张表，不常用的放一张表：用户表和用户详情表
+
+反3范式：
+有时候表中要有一些冗余字段，可以提高表的读取速度，
+这样可以避免过多的多表联查
+
+3.数据库引擎对比
+memory引擎：他是将数据存在内存中的，数据库一旦重启数据就会消失
+
+InnoDB和Myisam区别：
+事务：innodb支持，m不支持
+查询速度：i较慢，m较快
+全文索引：i不支持，m支持
+锁机制：m支持表锁，i支持行级锁
+比如m表在写入的时候，别人就不能从里面查询
+i表则是在操作一行的时候，别的行可以操作和查询，这一行的数据不能操作和查询
+
+文件存储形式：m是三个文件(myi/myd/frm),i两个文件(frm/ibd)
+myi是存索引
+myd存数据
+frm存表结构
+ibd是存数据和索引的
+
+4.mysql 锁
+读锁：
+不会影响其他用户对该表的读操作，但是会阻碍用户的写操作
+
+写锁：
+会阻塞用户对这个表的读和写操作
+
+操作过程：
+查看当前表的锁的征用情况：
+show status like "table_locks_waited"
+
+设置一个全局的参数
+set global concurrent_insert=0
+
+读写并行
+作者为了让写入的时间比较长，所以复制了一个表的数据，有好几万条
+将这几万条数据写入到一个新表中
+在写入的过程中，同时读取这个新表中的数据
+结果发现，在数据彻底写入表之前，读取操作
+是在等待状态，要过好一会才能将数据查询出来
+
+索引：是对一列或多列的值进行排序的存储结构
+作用：大大提升搜索速度
+索引类型：
+全文索引(只能对英文进行全文索引，中文不行)
+主键
+一般索引
+唯一索引(存身份证、手机号)
+
+添加主键
+alter table 表名 change/modify 字段名 ... primary key
+alter table 表名 add primary key(id)
+
+删除主键
+先删除自增
+alter table 表名 change/modify 字段名 ...(没有自增)
+alter table 表名 drop primary key 
+
+添加一般索引
+create index 索引名 on 表名(字段名)
+alter table 表名 add index(字段名)
+
+删除一般索引
+alter table 表名 drop index 索引名
+drop index 索引名 on 表名
+
+添加唯一索引
+create unique index 索引名 on 表名(字段名)
+alter table 表名 add unique(字段名)
+
+删除唯一索引
+alter table 表名 drop index 索引名
+drop index 索引名 on 表名
+
+但是一般都是用图形化工具的，不用命令行
+
+慢查询：就是一些查询速度慢的sql
+如何查询执行较慢的语句：
+以下面的一句语句来启动MySQL：
+mysqld_safe --user=mysql --slow_query_log --slow_query_log_file=/tmp/slow-query.log --long_query_time=1
+他的作用是将查询比较慢的语句写入到文件中，以便我们查看分析
+
+--slow_query_log 开启慢查询
+--slow_query_log_file 慢查询日志存放位置
+--long_query_time 定义多长时间算慢，单位秒
+
+以上是在linux 的用法
+
+
+在window中没有mysqld_safe命令，所以要通过在my.ini中做修改来开启慢查询：
+在[wampmysqld]中加3句
+
+# 代表MYSQL慢查询的日志存储目录
+log-slow-queries="D:/slow-query.log"
+long_query_time=1
+# 没有使用到索引的查询也将被记录在日志中
+log-queries-not-using-indexes
+
+但是发现改了配置之后不能重启mysql服务器，所以我有将上面3句改为
+slow_query_log=ON
+slow_query_log_file="D:/slow-query.log"
+long_query_time=1
+结果就成功了
+
+查看是否开启慢查询：
+show variables like "%quer%";
+
+看到
+ slow_query_log                         | ON
+ slow_query_log_file                    | D:/slow-query.log
+ 就说明开启成功
+
+查看执行了几次慢查询：
+show global status like "%slow%";
++---------------------+-------+
+| Variable_name       | Value |
++---------------------+-------+
+| Slow_launch_threads | 0     |
+| Slow_queries        | 1     |
++---------------------+-------+
+ 
+查看慢查询日志
+mysqldumpslow 慢查询日志的位置
+
+使用MySQL的命令来分析这个日志：
+explain 语句
+比如 
+explain select * from user
+他会分析这句话慢在哪里
+
+这个不开启慢查询也可以用
+但一般都是查看慢查询日志有哪些语句慢，然后在用explain分析这句话
+没有慢查询日志就不知道哪句sql慢
+
+得到的结果如下：
+           id: 1
+  select_type: SIMPLE
+        table: comment
+   partitions: NULL
+         type: ALL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 12
+     filtered: 100.00
+        Extra: NULL
+1 row in set, 1 warning (0.00 sec)
+
+type 搜索的类型
+possible_keys 可能用到的索引
+key 实际用到的索引
+key_len 索引长度
+ref 关联的字段
+rows 扫描的行数
+extra 额外信息
+
+其中重点有
+type 
+ALL 表示全表扫描 要避免全表扫描 
+像类似
+select * from 表名
+select * from 表名 where 字段名=值 (该字段没有建立索引)
+凡是这种没有使用索引的搜索，即使有搜索条件，但是他还是会对表从头搜到尾
+这种都是全表搜索
+
+type的类型 其性能从高到低排：
+null > system > const > eq_ref > ref > range > index >all
+
+null是不使用索引就能直接获得结果的，如
+select count(*) from 表名
+当然只限于myisam表，myisam引擎会在一开始将count(*)存在一个表里面。所以一查就查到了
+但是想max()/avg()/min()/sum() 他的类型还是all
+
+system 是表中满足条件的记录只有1条的查询，这个用到的很少
+
+const 通过主键和唯一键查找
+select * from 表名 where id=1
+
+eq_ref 通过关联查询，且一个表中的字段关联另一个表中的主键字段
+select * from A表 a left join B表 b on b.id=a.bid
+这种情况出现的很多，在用框架做项目的时候经常用到一对多、一对一、多对多的关联查询
+或者 
+select * from A表 a,B表 b where b.id=a.bid 
+
+其中A表是从表 B表是主表
+
+ref 是用过普通索引查询
+select * from articles where title="aaa"
+select * from comment where uid=100
+一般外键如pid uid tid 什么的都是要加普通索引的
+
+index 索引扫描
+select id from 表名
+索引扫描不是通过索引为条件搜索，而是搜索所有的某一索引字段的值
+
+all 全表扫描
+select * from user 
+select * from user limit 4
+
+mysql常见优化
+1.尽量不要用select *，而是搜索自己所需字段
+2.尽量对常常作为条件的字段添加索引
+3.模糊查询中的%前置时，即使该字段创建了索引，他也不会用到索引来搜索，如：title like "%xxx"
+4.如果使用or、||语句，两侧的条件字段都创建了索引才会使用索引
+	如果两侧都建立了索引，他的type是index_merge,即混合索引
+5.分组优化 对于分组的数据mysql会自动对数据进行排序，此时可以强制其不排序从而提高他的速度(order by null)
+  如：select * from user group by class order by null
+6.分页优化  
+  我们知道
+  select * from user limit 10,10也是全表搜索
+  我们可以这样优化
+  select * from user where id>10 limit 10
+  这就变成一个const类型的查询，就会得到优化
+  
+  如果是数据少，则优势体现不出来，如果数据很多
+  select * from user limit 9000,10	
+  他会从头开始扫描
+  
+  select * from user where id>9000 limit 10
+  他会从9000条之后开始扫，很快
+  
+  mysql 表分割：
+  分为水平拆分和垂直拆分
+  
+  水平拆分：
+  记录数多可以水平拆分，拆分的话可以按照时间拆，比如按年拆
+  这样用户按年搜索就可以到相应的表去搜索
+  也可以按余数来拆，例如订单表，
+  假如，拆成10张表，那么就要对10取余数，用户id为1的存在order_1表
+  id为2的存在order_2表，id为11的对10取余数还是1，依旧存在order_1中
+  不过水平查询缺点是要先获得表名（拼接表名），才能从这个表里面查
+  
+  垂直拆分：
+  将一些常用字段和不常用字段分拆为两张表
+  如用户表和用户详情表
+  订单表和订单详情表
+  不过缺点是要关联查询
+  
+  
+  mysql 主从复制
+  主从复制是有两台服务器，让一台服务器作为主服务器，另一台服务器作为从服务器
+  从服务器可以从主服务器中更新数据，那么主服务器负责做增删改操作，从服务器可以做
+  查询操作，这么一来就缓解了一台服务器的压力
+  
+  具体操作如下，在虚拟机上克隆一次原有的Linux系统，
+  其实不克隆也可以，用Linux作为从服务器，用Windows作为主服务器
+  
+  (先强调一点，主从服务器的mysql版本最好要一直，如果一个是5.5及以下版本，一个是以上版本，那么会因为低版本少了一个系统变量binlog_checkxxx变量而无法主从复制)
+  
+  
+  主服务器配置：
+  修改my.ini
+  [mysqld]
+  log-bin=mysql-bin 	//启用二进制日志
+  server-id=1	//服务器id
+  
+  由于这里是Windows系统，所以是在[wampmysql]中加这两行
+  而不是在[mysqld]中加
+  重启MySQL服务
+  创建mysql用户并授权：
+  在mysql命令行下：
+  grant replication slave on *.* to 'zbp'@'%' identified by "123456";
+  
+  grant 是授权
+  replication slave 是主从复制权限
+  on *.* 是所有库的所有表
+  to "zbp" 给slaver用户(如果zbp用户不存在就创建这个用户)
+  "%"是允许这个用户在任意ip都可以连接mysql
+  identified是用来设置密码的
+  
+  现在是相当于添加了一个用户
+  
+  再查看主服务器的信息：
+  在MySQL下：show master status;
+  会得到
+	File: mysql-bin.000001
+	Position: 154
+	Binlog_Do_DB:
+	Binlog_Ignore_DB:
+	Executed_Gtid_Set:
+  记住File、Position字段，待会会用到
+  
+  从服务器的配置：
+  在mysqld
+  [mysqld]
+  server-id=2	//服务器id，要和主服务器id不同
+  
+  重启MySQL服务
+  
+  然后以mysql -u root -p登录MySQL客户端
+  
+  再设置mysql服务器参数
+  change master to master_host="主服务器的ip",master_user="zbp",master_password="123456",master_log_file="mysql-bin.000001",master_log_pos=154;
+  
+  意思是，将登陆用户端的用户转为zbp这个用户，此时主从服务器就连接上了。
+  
+  启动同步：
+  start slave;
+  
+  查看从服务器状态：
+  show slave status \G;
+  
+  看slave_io_running 和 slave_sql_running 都为yes此时就连接成功了
+  
+  此时，主服务器新增一条数据，从服务器会自动新增一条数据
+  
+  然后将写操作定位到主服务器，将查询操作定位到从服务器即可
+  
+  
+  中文分词：是将一句话拆分为多个词
+  如：我来到北京清华大学=> 我/来到/北京/清华大学
+  
+  作用：提高对大段文本的检索
+  
+  比如，现在有一个article表，里面存了一篇篇的文章，
+  我再创建一个article_word表用来存储每一篇文章的关键词，如下
+  id word article_id 3个字段，word用来存每篇文章的关键字，article_id是外键，表示这个关键字是哪篇文章的
+  如果一篇文章的内容是：我爱北京天安门，天安门上太阳升，伟大领袖毛主席，领导人们向前进
+  此时article_word表如下：
+  id     word    article_id 
+  1		北京 	 1
+  2		天安门	 1
+  3		太阳	 1
+  4		领袖	 毛主席
+  5		(第二篇文章的关键字)	2
+  ...
+  
+  这样一来，原来我们是要用like
+  select * from article where content like "%天安门%"
+  来搜索含有天安门关键字的文章，但是这是全表搜索，会很慢
+  
+  有了中文分词表后，就从article_word表关联查找文章即可
+  select * from article a,article_word aw where a.id=aw.article_id and word="天安门"
+  此时就是eq_ref类型的查询，效率就高很多了。当然word要添加普通索引才行
+  
+  当然，分词不要自己做，而是用一个工具包，类似的分词工具包有很多，自己找。
+  这样的工具包可以将一串字符串的所有分词给挑出来返回一个arr,然后你要做的就是
+  在插入这篇文章的时候，将获取到的分词同时插入到分词表中
+  
+  最后是一些其他技巧：
+  1.插入数据不要循环插入，而是用一条语句插入：
+  insert into 表名 (colum1,colum2...,column) values (v1,v2,...,vn),(v1,v2,...,vn),...(v1,v2,...,vn);
+  
+  2.不要将图片存到数据库，而是存图片位置
+  
+  3.用伪删除，不要真的删除，而是添加一个字段来标记
+  
+  4.用analyze table 表名 命令，他会建议你该怎么优化表
+  
+  5.尽量避免有null的字段，否则条件搜索的时候他会额外增加对null的判断，所以多用默认值不用null
+  
+  6.使用缓存
+  
+  7.定期执行 optimize table 表名 命令整理碎片
+  

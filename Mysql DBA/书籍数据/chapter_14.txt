@@ -1,0 +1,80 @@
+14.1.2 删除大文件
+##rm_large_file.sh
+#!/bin/bash
+## 调用truncate命令删除文件,仅针对大文件(大于几个GB的文件)
+## 调用方式  ./rm_large_file  file_name
+if [ "$#" != "1" ] ; then
+   echo "please input file name"
+   exit 99
+fi
+filename=$1
+filesize=`ls -lh $filename  | cut -d\   -f5| cut -dG -f1`
+# 文件大于1GB,且必须是数字
+if [[ "${filesize}" == *[!0-9]* ]] ; then
+    echo "warning:非数字,可能没有1GB"
+    exit 99
+fi
+if [ $filesize -le 1 ];then
+    echo "too smalll size"
+    exit 88
+fi
+if [ $filesize -ge 500 ];then
+    echo "too large size,please modify the shell scripts"
+    exit 88
+fi
+ 
+sleeptime=3
+echo "truncate file $filename ... ,sleep $sleeptime seconds per truncates"
+date_start=$(date +%s)
+for i in `seq $filesize -1 1 `
+do
+   sleep $sleeptime
+   echo "truncate to ${i}G"
+   truncate -s ${i}G $filename
+done
+rm  $filename
+date_end=$(date +%s)
+echo "`date "+%Y-%m-%d %H:%M:%S"` . rm file  $filename completed. ($((date_end-date_start)) sec)"
+
+
+
+
+14.1.3 获取吞吐信息
+##实时显示MySQL吞吐信息
+mysqladmin  -uroot -p  -r -i 2 extended-status |awk -F "|" 'BEGIN { count=0; } { if($2 ~ /Variable_name/ && ++count%15 == 1){print "----------|---------|--- MySQL Command Status --|----- InnoDB row operation -----|-- Buffer Pool Read --";    print "---Time---|---QPS---|select insert update delete|   read inserted updated deleted|   logical    physical";} else if ($2 ~ /Queries/){queries=$3;} else if ($2 ~ /Com_select /){com_select=$3;} else if ($2 ~ /Com_insert /){com_insert=$3;} else if ($2 ~ /Com_update /){com_update=$3;} else if ($2 ~ /Com_delete /){com_delete=$3;} else if ($2 ~ /InnoDB_rows_read/){innodb_rows_read=$3;} else if ($2 ~ /InnoDB_rows_deleted/){innodb_rows_deleted=$3;} else if ($2 ~ /InnoDB_rows_inserted/){innodb_rows_inserted=$3;} else if ($2 ~ /InnoDB_rows_updated/){innodb_rows_updated=$3;} else if ($2 ~ /InnoDB_buffer_pool_read_requests/){innodb_lor=$3;} else if ($2 ~ /InnoDB_buffer_pool_reads/){innodb_phr=$3;} else if ($2 ~ /Uptime / && count >= 2){  printf(" %s |%9d",strftime("%H:%M:%S"),queries);printf("|%6d %6d %6d %6d",com_select,com_insert,com_update,com_delete);printf("|%8d %7d %7d %7d",innodb_rows_read,innodb_rows_inserted,innodb_rows_updated,innodb_rows_deleted); printf("|%10d %11d\n",innodb_lor,innodb_phr);}}'
+
+
+
+14.2.8 查看锁的等待
+SELECT r.trx_id AS waiting_trx_id, r.trx_MySQL_thread_id AS waiting_thread,TIMESTAMPDIFF(SECOND, r.trx_wait_started, CURRENT_TIMESTAMP) AS wait_time,r.trx_query AS waiting_query,
+l.lock_table AS waiting_table_lock,
+b.trx_id AS blocking_trx_id, b.trx_MySQL_thread_id AS blocking_thread,
+SUBSTRING(p.host, 1, INSTR(p.host, ':') - 1) AS blocking_host,
+SUBSTRING(p.host, INSTR(p.host, ':') +1) AS blocking_port,
+IF(p.command = "Sleep", p.time, 0) AS idle_in_trx,
+b.trx_query AS blocking_query
+FROM INFORMATION_SCHEMA.INNODB_LOCK_WAITS AS w
+INNER JOIN INFORMATION_SCHEMA.INNODB_TRX AS b ON b.trx_id = w.blocking_trx_id
+INNER JOIN INFORMATION_SCHEMA.INNODB_TRX AS r ON r.trx_id = w.requesting_trx_id
+INNER JOIN INFORMATION_SCHEMA.INNODB_LOCKS AS l ON w.requested_lock_id = l.lock_id
+LEFT JOIN INFORMATION_SCHEMA.PROCESSLIST AS p ON p.id = b.trx_MySQL_thread_id
+ORDER BY wait_time DESC
+
+
+SELECT CONCAT('thread ', b.trx_MySQL_thread_id, ' from ', p.host) AS who_blocks,
+IF(p.command = "Sleep", p.time, 0) AS idle_in_trx,
+MAX(TIMESTAMPDIFF(SECOND, r.trx_wait_started, NOW())) AS max_wait_time,
+COUNT(*) AS num_waiters
+FROM INFORMATION_SCHEMA.INNODB_LOCK_WAITS AS w
+INNER JOIN INFORMATION_SCHEMA.INNODB_TRX AS b ON b.trx_id = w.blocking_trx_id
+INNER JOIN INFORMATION_SCHEMA.INNODB_TRX AS r ON r.trx_id = w.requesting_trx_id
+LEFT JOIN INFORMATION_SCHEMA.PROCESSLIST AS p ON p.id = b.trx_MySQL_thread_id
+GROUP BY who_blocks ORDER BY num_waiters DESC\G
+
+
+
+14.2.10 root帐号权限异常
+INSERT INTO `user` (`Host`, `User`, `Password`, `Select_priv`, `Insert_priv`, `Update_priv`, `Delete_priv`, `Create_priv`, `Drop_priv`, `Reload_priv`, `Shutdown_priv`, `Process_priv`, `File_priv`, `Grant_priv`, `References_priv`, `Index_priv`, `Alter_priv`, `Show_db_priv`, `Super_priv`, `Create_tmp_table_priv`, `Lock_tables_priv`, `Execute_priv`, `Repl_slave_priv`, `Repl_client_priv`, `Create_view_priv`, `Show_view_priv`, `Create_routine_priv`, `Alter_routine_priv`, `Create_user_priv`, `ssl_type`, `ssl_cipher`, `x509_issuer`, `x509_subject`, `max_questions`, `max_updates`, `max_connections`, `max_user_connections`)
+VALUES('localhost','root','','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','','','','','0','0','0','0');
+
+

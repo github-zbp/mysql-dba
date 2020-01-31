@@ -1,0 +1,175 @@
+主从复制 + Mycat读写分离
+
+Mycat不负责进行主从复制，主从复制是在MySQL上进行配置的。
+之前读写分离是在Web应用，也就是TP5的database.php中配置的。现在我们直接在Mycat中配置。
+
+任务条件如下：
+mycat所在主机：204.175.124.51
+主节点IP：125.22.28.4
+主节点的分片节点：test1/test2/test3
+从节点IP：125.22.28.5 和 125.22.28.6
+从节点同步主节点的test1/test2/test3
+test1~3的表t1是一个大表，将其数据按取模算法水平切分到test1~3中。
+主节点挂掉时，从节点依然可以查数据。
+开启主从复制延时，当从节点有延时，则从主节点读取数据。
+
+
+1. 主从复制
+
+125.22.28.4操作：
+
+配置文件
+server-id=4
+log-bin=/var/lib/mysql/binlog
+log-bin-index=/var/lib/mysql/binlog.index
+binlog_format=mixed
+expire_logs_days	= 10
+max_binlog_size   = 100M
+lower_case_table_names=1    # 忽略表名大小写
+
+创建授权用户
+grant replication slave on *.* to "repl"@"125.22.28.%" identified by "xxxxx";
+ 
+查看master状态
+show master status;
++---------------+----------+--------------+------------------+-------------------+
+| File          | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++---------------+----------+--------------+------------------+-------------------+
+| binlog.000001 |      448 |              |                  |                   |
++---------------+----------+--------------+------------------+-------------------+
+
+
+
+125.22.28.5操作：
+修改uuid
+select uuid();
+vi /var/lib/mysql/auto.cnf
+将查询到的uuid在auto.cnf中更新。
+
+配置文件
+server-id=5
+relay-log=/var/lib/mysql/slave-bin
+relay-log-index=/var/lib/mysql/slave-bin.index
+replicate-do-db=test1
+replicate-do-db=test2
+replicate-do-db=test3
+replicate-do-db=mysql
+slave-skip-errors=all
+binlog_format=mixed
+lower_case_table_names=1    # 忽略表名大小写
+
+指向主节点：
+stop slave;
+reset slave;
+change master to master_host="125.22.28.4",master_user="repl",master_password="xxxxx",master_log_file="binlog.000001",master_log_pos=448;
+start slave;
+
+查看slave状态：
+show slave status;
+
+
+125.22.28.6操作同上
+
+在 125.22.28.4中授权一个mycat用户，用于给mycat连接，两个从节点也会生成该用户。
+grant all privileges on *.* to "mycat"@"204.175.124.51" identified by "opson12356";
+
+在 125.22.28.4中创建test1~3，在从节点也会生成。
+
+
+
+2.搭建Mycat的读写分离
+配置schema.xml
+
+<mycat:schema xmlns:mycat="http://io.mycat/">
+    <schema name="test" checkSQLschema="true" sqlMaxLimit="100" randomDataNode="dn1,dn2,dn3">
+        <table name="t1" primaryKey="ID" dataNode="dn1,dn2,dn3" rule="mod-long"></table>
+    </schema>
+    
+    <dataNode name="dn1" dataHost="host1" database="test1"></dataNode>
+    <dataNode name="dn2" dataHost="host1" database="test2"></dataNode>
+    <dataNode name="dn3" dataHost="host1" database="test3"></dataNode>
+    
+    <dataHost name="host1" maxCon="1000" minCon="10" balance="1" writeType="0" dbType="mysql" dbDriver="native" switchType="1" slaveThreshold="100">
+        <heartbeat>show slave status</heartbeat>
+        <writeHost host="hostM1" url="125.22.28.4:3306" user="mycat" password="opson12356">
+            <readHost host="hostS1" url="125.22.28.5:3306" user="mycat" password="opson12356"></readHost>
+            <readHost host="hostS2" url="125.22.28.6:3306" user="mycat" password="opson12356"></readHost>
+        </writeHost>
+    </dataHost> 
+</mycat:schema>
+
+需要注意的点：
+<table>一定要指定primaryKey来指定分片的字段。
+
+rule="mod-long" 分片算法为取模
+
+dataNode="dn1,dn2,dn3"  三个分片节点（库），有几个库就指定几个dataNode
+
+<dataHost>  balance="1" 使用读写分离的负载均衡，只有备份写节点和读节点才会进行读操作。写节点不会进行读操作只进行写操作。
+
+switchType="1" slaveThreshold="100"  从节点同步延时超过100就自动切换
+
+<heartbeat>show slave status</heartbeat>    读写分离的heartbeat要使用show slave status语句，而不是select user()语句。
+
+<readHost>包在了<writeHost>里面，那么当主机点<writeHost>崩溃的时候，从节点<readHost>就无法进行读操作。
+
+遇到的几个问题：
+1.<readHost>只能被包在<writeHost>里面，如果<readHost>和<writeHost>放在同级，启动mycat时就会报错。
+2.mysql端记得设置忽略表名大小写，lower_case_table_names=1 ，不然会遇到很多麻烦。字段大小写是会自动忽略的。
+
+
+3.配置server.xml 
+增加用户
+<user name="u1">
+    <property name="password">xxx</property>
+    <property name="schemas">test</property>
+</user>
+
+4.启动mycat 
+mycat start   # 后台运行，mycat console 是前台运行
+mycat status  # 查看状态
+
+5.连接测试
+mysql -h204.175.124.51 -uu1 -P8066 -pxxxxx
+use test 
+
+# 插入一条语句
+insert into t1 (`id`,`name`,`type_id`) values (320,'mls2ki',1);
+
+# 查询
+select * from t1;
+
+
+实验记录如下：
+尝试关闭主节点主机的MySQL服务再查询。发现报错说 
+backend connect: java.lang.Throwable: java.net.ConnectException: Connection refused
+说明主节点挂掉，从节点查询就会失败，符合配置文件的设置。
+
+尝试关闭所有从节点的MySQL服务再查询。
+发现报错说
+backend connect: java.lang.Throwable: java.net.ConnectException: Connection refused
+说明从节点挂掉之后，mycat不会从主节点进行查询
+
+关闭其中从节点1，开启从节点2，发现依然可以查询。
+关闭其中从节点2，开启从节点1，发现依然可以查询。
+说明负载均衡实现了（balance="1"的作用）。
+
+
+现在我们希望主节点关闭之后，从节点依旧可以进行读操作，可以将schema.xml的<dataHost>部分修改为：
+<dataHost name="host1" maxCon="1000" minCon="10" balance="1" writeType="0" dbType="mysql" dbDriver="native" switchType="-1" slaveThreshold="100">
+    <heartbeat>show slave status</heartbeat>
+    <writeHost host="hostM1" url="125.22.28.4:3306" user="mycat" password="opson12356"></writeHost>
+    <writeHost host="hostS1" url="125.22.28.5:3306" user="mycat" password="opson12356"></readHost>
+    <writeHost host="hostS2" url="125.22.28.6:3306" user="mycat" password="opson12356"></readHost>
+</dataHost> 
+
+其关键是
+将之前的两个<readHost>标签改为<writeHost>标签。这样主节点hostM1挂掉后，从节点依旧可以查询。
+将swichType改为-1，这样主节点挂掉之后，从节点不会切换为主节点来写入数据，因为如果从节点写入数据，会造成多节点的数据不统一。
+
+这个例子也说明：
+从节点并非一定要用<readHost>标签。用<writeHost>的节点也可以是从节点。为了区分writeHost的节点是主节点还是从节点，可以用hostM1和hostS1来区分，当然这只是个名字，除了区分并没有实际作用。
+
+实验记录如下：
+尝试关闭主节点主机的MySQL服务再在Mycat查询，依然可以查询。但是在mycat中无法写入，说明从节点并没有切换为主节点担任写的任务
+发现插入之后，查询到的数据没有新数据，有同步延时。此时可以将switchType改为2，balance改为2，当有延迟的时候就会从主节点读取而不会从从节点读取。但是如果主节点挂掉，从节点就会顶替主节点进行写。

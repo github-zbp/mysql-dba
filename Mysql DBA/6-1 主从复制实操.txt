@@ -1,0 +1,304 @@
+从服务器 204.175.124.51
+主服务器 54.22.37.2
+目标：同步主服务器的hst数据库，但不对其他数据库同步
+
+# 先查看两个服务器是否都开启了binlog日志
+show variables like "%log_bin%";
+
+================== 对主服务器的操作 ======================
+# 先将hst库备份(在进行同步之前,从节点要先导入hst库,否则在主节点有hst而从节点没有hst的情况下,主节点对hst进行操作,会导致从节点同步操作失败,并且中断之后的同步操作)
+
+# 对主服务器开启binlog
+server-id=100   # 指定server id
+log-bin=/var/lib/mysql/mysql-bin    # 指定名称
+binlog-do-db=hst        # 指定只对hst数据库备份
+
+重启服务
+
+# 查看是否开启binlog日志
+show variables like "%log_bin%";
+
+结果如下：
++---------------------------------+--------------------------------+
+| Variable_name                   | Value                          |
++---------------------------------+--------------------------------+
+| log_bin                         | ON                             |
+| log_bin_basename                | /var/lib/mysql/mysql-bin       |
+| log_bin_index                   | /var/lib/mysql/mysql-bin.index |
+| log_bin_trust_function_creators | OFF                            |
+| log_bin_use_v1_row_events       | OFF                            |
+| sql_log_bin                     | ON                             |
++---------------------------------+--------------------------------+
+
+结果已开启
+
+
+
+# 对用户进行授权（如果用户没有创建会自动创建）
+grant replication slave on *.* to "cjq"@"204.175.124.51" identified by "xxxxx";
+
+这里注意以下，有人可能会这样写来表示只同步hst这个数据库：
+grant replication slave on hst.* to "cjq"@"204.175.124.51" identified by "xxxxx";
+
+结果会报错 Incorrect usage of DB GRANT and GLOBAL PRIVILEGES
+
+所以只能在配置文件限定要同步的库名才行。
+
+当然,主节点可以不设置binlog-do-db选项,但是从节点就要设置replicate-do-db=hst ,表示从节点只会对主节点的hst库进行同步
+什么时候会用replicate-do-db而不会用binlog-do-db:
+假如有一台主节点A,两台从节点:B,C; B要同步A的d1库,C要同步A的d2库,此时就不适宜用binlog-do-db,而适合用replicate-do-db。
+
+
+# 查看主节点的二进制日志状态
+show master status    
++------------------+----------+--------------+------------------+-------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++------------------+----------+--------------+------------------+-------------------+
+| mysql-bin.000002 |      154 | hst          |                  |                   |
++------------------+----------+--------------+------------------+-------------------+
+
+记录下 File 和 Position 这两个字段的值，待会在从服务器进行指向主服务器的时候会用到。
+
+
+
+================== 对从服务器的操作 ======================
+首先，尝试连接主服务器
+mysql -h54.22.37.2 -ucjq -pxxxxx
+
+如果连接没成功，说明主服务器限定了连接的IP只能时主服务器本机，或者是因为开了防火墙。把主节点和从节点的防火墙关了，在主服务器配置文件的[mysqld]下修改bind-address参数为从服务器IP和127.0.0.1即可，记得重启主服务器。
+并且重新查看show master status，记录下File和Position字段，因为每重启一次服务，就会生成一个新的binlog日志。
+
+退出连接
+
+连接从节点本机的客户端
+
+# 导入hst库
+
+# 查看是否开启二进制日志：
+
+show variables like "%log_bin%";
++---------------------------------+-------+
+| Variable_name                   | Value |
++---------------------------------+-------+
+| log_bin                         | ON    |
+| log_bin_trust_function_creators | OFF   |
+| sql_log_bin                     | ON    |
++---------------------------------+-------+
+
+这里已开启，如果没开启则到配置文件添加
+server-id = 99      # 和上面的server-id不同即可
+log-bin= 二进制日志的路径和名称
+然后重启服务
+
+# 配置同步日志：在配置文件的[mysqld]中添加：
+relay-log=/var/lib/mysql/relay-bin               #同步日志文件的路径
+relay-log-index=/var/lib/mysql/relay-bin.index   #同步日志的索引文件
+slave-skip-errors=all                            #跳过同步sql时发生的报错,以防止因一两句sql错误导致同步中断
+
+重启服务
+
+# 从服务器指向要同步的主服务器
+change master to master_host="54.22.37.2",master_user="cjq",master_password="xxxxx",master_log_file="mysql-bin.000002",master_log_pos=154;
+
+# 启动从节点并查看从节点的同步是否已经开启
+start slave
+show slave status\G;
+
+
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 54.22.37.2
+                  Master_User: cjq
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000002
+          Read_Master_Log_Pos: 154
+               Relay_Log_File: relay-bin.000002
+                Relay_Log_Pos: 407
+        Relay_Master_Log_File: mysql-bin.000002
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB:
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 154
+              Relay_Log_Space: 695
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+        Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 86
+1 row in set (0.00 sec)
+
+
+如果下面两项：
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+都是Yes那么同步成功
+
+如果有No，同步失败，这是可以查看字段Last_IO_Error 和 Last_SQL_Error
+Last_IO_Error一般是无法连接，授权问题等报错
+Last_SQL_Error一般是在主服务器执行增删改操作时，从服务器无法同步语句的报错
+
+
+
+
+
+================== 主从复制的注意点和常见报错 ======================
+1. 远程连接数据库失败
+检查方式: 在主节点授权用户给从节点之后,在从节点服务器上尝试远程连接一下主节点: mysql -h主节点ip -u授权用户名 -p密码
+如果连接成功则没问题,否则就有问题
+
+连接失败主要原因有 : 
+a.主节点的配置文件设置了 bind-address = 127.0.0.1 只允许主机连接;
+b.主节点或者从节点设置防火墙
+
+解决方法:
+a.在主节点和从节点的配置文件的[mysqld]下修改 bind-address=0.0.0.0 允许任何ip连接;或者 bind-address = 127.0.0.1 其他ip 这样就只允许本机和指定的其他ip连接本服务器的mysql
+b.将主从服务器的防火墙都关闭
+
+
+2. 主从节点的mysql版本不同导致同步sql失败
+
+检查方式和原因:
+a.首先,同步sql失败,我们可以在从节点通过 show slave status\G; 查看相关失败信息。
+
+会看到 Slave_SQL_Running: No
+然后找到 Last_SQL_Error 字段，会显示错误原因。
+如果该字段显示的错误原因不详细，可以查看mysql的错误日志查看详细的原因。
+
+b.mysql版本不同的情况下,并非不能进行主从复制;
+此时 高版本作为从节点,低版本作为主节点可以进行同步;反之不行。
+原因是 不同版本的mysql,其mysqlbinlog的版本不同,5.5及以下,其mysqlbinlog的版本为3.3,以上版本为3.4;
+高版本的mysqlbinlog可以兼容低版本的mysqlbinlog命令，也就是说，高版本的mysqlbinlog命令可以解析低版本mysql的二进制日志,但是反之低版本的mysqlbinlog命令不能解析高版本mysql生成的二进制日志。
+
+而我们知道，主从复制的原理就是从节点同步主节点的二进制日志,然后执行所同步的二进制日志中增删改命令;
+当高版本作为从节点,高版本的mysqlbinlog命令就能够解析低版本mysql生成的二进制日志并执行里面的命令从而同步。
+当低版本作为主节点,那么就会报错,就是因为无法解析高版本的日志内容。
+
+假如 低版本作为从节点，高版本作为主节点，那么查看错误日志会发现报错：
+Error in Log_event::read_log_event(): 'Found invalid event in binary log', data_len: xx, event_type: xx
+
+就是因为mysqlbinlog的版本不同。
+
+所以mysql版本不同导致同步sql失败的本质原因是：mysqlbinlog命令版本不同;像mysql5.6和5.7版本的mysqlbinlog的版本都是3.4 ,那么也不会出现这个问题。
+
+查看mysqlbinlog命令的版本:
+mysqlbinlog -V
+
+c.在主从节点不一致的情况下,推荐使用mixed格式的二进制日志文件,在主从节点的配置文件下同时设置 binlog_format=mixed;这样可以防止因为二进制日志格式不同引起的同步sql失败
+
+当然,这样做依旧不能解决mysql版本不同导致同步sql失败这个问题
+
+
+解决方法:
+a.高版本作为从节点,低版本作为主节点
+b.如果非要高版本作为主节点,低版本作为从节点,只能升级从节点的mysql版本。
+
+结论：
+主从节点尽可能都是相同版本的mysql
+
+
+3.部分同步的问题
+
+如果从节点只同步主节点的某一个库或者部分库,可以使用一下四个配置:
+binlog-do-db=库名            # 在主节点配置,表示只记录指定库的操作到二进制日志,结果是只同步该库
+binlog-ignore-db=库名        # 在主节点配置,表示不记录指定库的操作到二进制日志,结果是不同步该库
+replicate-do-db=库名         # 在从节点配置,表示只同步某库的binlog日志,结果是只同步该库
+replicate-ignore-db=库名     # 在从节点配置,表示不同步某库的binlog日志,结果是不同步该库
+
+replicate-do-db和binlog-do-db只需配置其中一个即可,无需两个服务器同时配置。建议视同replicate-do_db
+
+如果要指定多个数据库，只需重复设置这个选项即可。
+
+
+4.主从节点数据不一致问题
+主从复制目的是让主服务器只做读操作，让从服务器做读操作，减轻数据库的负担。
+
+所以从服务器本身是不应该写入数据的，所以可以在从服务器的配置中写入 read-only参数
+
+注意: 
+a.read_only=1只读模式，限定的是普通用户进行数据修改的操作，但不会限定具有super权限的用户的数据修改操作 
+b.一旦设置了read_only,所有库的所有表都不能写,所以对于只同步部分库或者一个库的情况不合适
+c.read_only不会影响主从节点的同步
+
+5.从服务器因同步sql失败而停止运行
+
+举个例子，有一种情况：
+主节点：A
+从节点：B
+同步的库：d1
+
+现在 A节点有库d1,d1有一个表t1
+此时,B节点进行同步A节点
+然后,A节点往d1.t1写入一条数据,B节点同步失败,查看show slave status
+原因是,B还没有建立数据库d1
+
+这个时候,由于上面的一个错误,导致A和B直接终止了同步,如果想再同步,就要重新执行 change master to 命令
+而由于A做出了操作,所以A的二进制日志做出了改变,所以 master_log_pos 不同了,于是想再同步要做出以下命令
+
+在A节点: show master status;    并记录下 File和Position字段
+在B节点: stop slave;   # 必须先停止slave
+         change master to master_host="A的ip",master_password="xxx",master_user="user",master_log_file="xxx",master_log_pos="xxx";
+         start slave;  
+         
+现在A和B又同步了,这个时候,B节点自己创建了d1库,然而还没等B自己创建t1表,A节点又往t1表中写入一条数据。
+此时 A,B的同步再一次失败，原因很简单，B没有t1表,怎么能在t1表中插入数据呢。
+于是B又要再重复一次上面的步骤才能将A，B再同步起来。
+
+为了解决这个问题，可以在从节点使用 slave-skip-errors 配置 
+slave-skip-errors=all
+
+表示从服务器跳过同步错误,这样就不会因为一两句错误导致同步断开。
+
+设置了slave-skip-errors=all 之后,即使B没有t1表,A往t1表插入数据,B也不会有报错,而是生成提示记录在错误日志中。
+
+当然，最好的处理是，一开始先将A的d1备份到B之后，再对AB进行同步。
+同时也要在配置文件中设置slave-skip-errors=all,重启服务
+
+双管齐下
+
+6. 主节点或者从节点重启,是否要重新执行change master to和start slave命令?
+从节点重启会自动执行change master to 和start slave 所以不用自己执行
+
+主节点重启的话,我们知道,每一次重启就会生成一个新的binlog文件,并且使用这个新的binlog文件。
+那么是不是从节点要重新执行change master to 来定位到主节点这个新的binlog文件呢
+也不用，主节点重启时，主从节点的连接断开，查看show slave status;
+Slave_IO_Running: Connecting
+表示从节点正在连接主节点。
+
+当主节点重启完成，从节点会重新指向主节点的新的binlog文件和其Position
+
+7.二进制日志文件过多过大怎么办
+expire_logs_days        = 10    # 10天前的二进制日志自动删除
+max_binlog_size   = 100M        # 超过100M就自动生成新的二进制日志
+
+这是针对二进制日志而不是针对同步日志relay-bin的,relay-bin会自动清理的。
+
+8.start slave时报错：
+Slave failed to initialize relay log info structure from the repository
+
+这是由于之前进行过主从复制，没有清干净；
+
+reset slave 
+
+然后再start slave即可。
+

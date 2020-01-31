@@ -1,0 +1,922 @@
+数据库多节点
+
+多节点数据库的好处：
+1.性能更高，通过负载均衡提高服务器的负载
+2.安全问题，如果有多节点，一个数据库宕机还有另一个数据库可以访问
+或者如果因为宕机导致一个数据库的数据丢失，还可以有其他数据库的备份，这个叫做数据冗余。
+
+
+主从复制就是数据库多节点的其中一个方法：
+它依赖于binlog日志
+
+主从复制的使用场景：
+两种：数据库备份 和 读写分离
+
+实现读写分离，从而提高数据库的性能，比如有两台服务器，一台主节点，一台从节点，在主库进行增删改，所以主库要开事务，操作起来比较慢。而从库只进行读取，读是可以不添加事务的，会快很多，我们可以部署多台从库进行读取，只要数据写进了主库，所有的从库都会进行更新。
+而且实现了数据冗余，增加了安全性。
+
+主从复制的原理：
+假设现在有一台主节点，四台从节点。主库专门负责写，从库只负责读。
+主库开事务，从库不开。
+当主库插入了一条数据，那么这个插入操作会被记录到主库的日志文件，而从库会读取主库的日志文件里面的操作，并执行一遍，这样从库也会产生这么一条数据。这个日志就是binlog日志
+
+从节点不能太多，否则这些从库都去读取日志文件并同步就会导致同步的延时问题，从节点们间的数据就可能不一致。
+
+如果从节点太多，我们就要在业务上进行改善了。
+
+======================================================
+binlog日志：
+
+在这里顺便说一下，MySQL有哪些日志：
+Error log  错误日志
+General query log 普通查询日志
+Slow query log  慢日志文件
+binary log  二进制日志
+
+binary log 就是个二进制文件，记录着数据库所有DML和DDL操作，他的作用有两个：
+1.增量备份
+2.主从复制
+
+我们使用mysqldump进行备份的时候，一般是备份整个数据库，但是会产生比较大的数据，如果希望只备份新产生的值，就需要用到二进制日志，读取里面的操作。
+
+mysql默认不开启binlog的。
+show variables like "%log_bin%"
++---------------------------------+-------+
+| Variable_name                   | Value |
++---------------------------------+-------+
+| log_bin                         | OFF   |
+| log_bin_trust_function_creators | OFF   |
+| sql_log_bin                     | ON    |
++---------------------------------+-------+
+
+开启binlog
+进入my.cnf
+
+vi /etc/my.cnf 
+
+在[mysqld]下加入两行（在其他地方加无效）：
+server-id = 1
+log-bin=/var/lib/mysql/mysql-bin  #指定二进制文件的文件名的basename
+
+此时/var/lib/mysql会出现两个文件
+mysql-bin.000001    #二进制文件
+mysql-bin.index     #二进制索引文件
+
+如何查看二进制日志内容：
+mysqlbinlog 二进制文件名路径
+
+或者 先登录客户端，然后
+show binglog events in "日志文件名"
+
+部分内容如下：
+# at 59484
+#200113  9:14:45 server id 1  end_log_pos 59591         Query   thread_id=461  exec_time=0      error_code=0
+use `test`/*!*/;
+SET TIMESTAMP=1578878085/*!*/;
+create table test1(id int,name varchar(100))
+/*!*/;
+
+# at 59591
+#200113  9:15:15 server id 1  end_log_pos 59659         Query   thread_id=461  exec_time=0      error_code=0
+SET TIMESTAMP=1578878115/*!*/;
+BEGIN
+/*!*/;
+
+# at 59659
+#200113  9:15:15 server id 1  end_log_pos 59756         Query   thread_id=461  exec_time=0      error_code=0
+SET TIMESTAMP=1578878115/*!*/;
+insert into test1 values (1,"zbp")
+/*!*/;
+
+# at 59756
+#200113  9:15:15 server id 1  end_log_pos 59783         Xid = 25496
+COMMIT/*!*/;
+
+
+上面从 # at xxx 到 /*!*/;是一个完整的部分，这部分叫做事件，事件包括两部分：
+事件头 是该操作的一些信息，如操作在二进制日志的开始位置 "# at 59591"，执行时的时间 "SET TIMESTAMP=1578878115"，执行所化的时间“exec_time=0” 等
+
+事件体 具体的操作语句 如 “insert into test1 values (1,"zbp")” 
+
+所以根据二进制日志，我们可以做一些恢复操作。
+
+
+show binglog events;  # 只显示mysql-bin.000001的内容，如果想查看其他日志文件内容就要指定日志文件名
+
+*************************** 593. row ***************************
+   Log_name: mysql-bin.000001
+        Pos: 58929
+ Event_type: Query
+  Server_id: 1
+End_log_pos: 59099
+       Info: use `zbpblog`; UPDATE `blogs`  SET `real_click` = `real_click` + 1  WHERE  `create_time` <= 1578876263  AND `id` = '26'
+*************************** 594. row ***************************
+   Log_name: mysql-bin.000001
+        Pos: 59099
+ Event_type: Query
+  Server_id: 1
+End_log_pos: 59171
+       Info: COMMIT
+*************************** 595. row ***************************
+   Log_name: mysql-bin.000001
+        Pos: 59171
+ Event_type: Query
+  Server_id: 1
+End_log_pos: 59242
+       Info: BEGIN
+*************************** 596. row ***************************
+   Log_name: mysql-bin.000001
+        Pos: 59242
+ Event_type: Query
+  Server_id: 1
+End_log_pos: 59412
+       Info: use `zbpblog`; UPDATE `blogs`  SET `real_click` = `real_click` + 1  WHERE  `create_time` <= 1578876861  AND `id` = '32'
+*************************** 597. row ***************************
+   Log_name: mysql-bin.000001
+        Pos: 59412
+ Event_type: Query
+  Server_id: 1
+End_log_pos: 59484
+       Info: COMMIT
+
+
+每次重启服务器，会新创建一个binlog日志（通过flush logs命令），那么这有什么好处呢：
+比如昨天有一个binlog文件，今天有一个binlog日志，今天发现昨天有一个误操作，要恢复，就可以针对昨天的日志文件来做恢复。而且这样也不会让一个binlog文件太大。
+
+二进制操作：
+flush logs  # 刷新日志文件
+show binlog events in "xxx"     #查看日志文件内容
+show master status      # 查看当前使用的日志的状态
+show master logs        # 查看所有日志文件（相当于查看日志索引文件）
+reset master            # 清空所有日志文件（非常危险，不建议）
+
+
+# 如何使用二进制文件恢复数据（此方法只适用于恢复少量数据）
+mysqlbinlog mysql-bin.000001 | mysql -uroot -p
+
+该命令(使用了管道符)会将mysql-bin.000001中所有的MySQL操作都执行一遍；
+
+但是我们的误操作为：
+delete from user where id = 56;
+
+此时我们要恢复的数据只有一条，不可能为了恢复一条数据而将一整个日志文件都执行一遍。
+此时我们就要找出 id为56的这条数据时在啥时候创建的，然后找到相应的binlog日志文件，使用 mysqlbinlog 文件名 去查看创建id为56的数据的起始和结束位置（就是 #at xxx ,结束位置就是下一个事件的起始位置），假如这个位置是 123 166
+
+执行：
+mysqlbinlog mysql-bin.000001 --start-position 123 --stop-position 166 | mysql -uroot -p
+
+即可；
+
+还可以使用 --start-datetime=xxx 和 --stop-datetime=xxx 根据时间戳范围去恢复，当然还是要查看二进制文件，看这个事件是什么时间创建的数据。
+
+所以二进制日志文件恢复数据是有局限的：
+如果删除的是很久远的数据，要找到这个数据创建或者修改操作实在哪个二进制日志的哪个位置，很麻烦。
+如果删除的数据不只是一条，还要找多条数据的创建是在哪几个日志的哪些位置。
+
+所以该方法适用于刚刚发生的或几天内发生的，而且是少量数据的误操作的恢复。
+如果是大量数据的误删除，我们只能通过平时备份来恢复。所以平时多做备份才是王道。
+
+
+PS：二进制日志只记录增删改，不会记录查询语句
+
+
+关于二进制日志的三种模式(格式):
+
+mysql复制主要有三种方式：基于SQL语句的复制(statement-based replication, SBR)，基于行的复制(row-based replication, RBR)，混合模式复制(mixed-based replication, MBR)。
+
+对应的，binlog的格式也有三种：STATEMENT，ROW，MIXED。
+
+① STATEMENT模式（SBR）
+
+每一条会修改数据的sql语句会记录到binlog中。优点是并不需要记录每一条sql语句和每一行的数据变化，减少了binlog日志量，节约IO，提高性能。缺点是在某些情况下会导致master-slave中的数据不一致(如sleep()函数， last_insert_id()，以及user-defined functions(udf)等会出现问题)
+
+② ROW模式（RBR）
+
+不记录每条sql语句的上下文信息，仅需记录哪条数据被修改了，修改成什么样了。而且不会出现某些特定情况下的存储过程、或function、或trigger的调用和触发无法被正确复制的问题。缺点是会产生大量的日志，尤其是alter table的时候会让日志暴涨。
+
+③ MIXED模式（MBR）
+
+以上两种模式的混合使用，一般的复制使用STATEMENT模式保存binlog，对于STATEMENT模式无法复制的操作使用ROW模式保存binlog，MySQL会根据执行的SQL语句选择日志保存方式。
+
+
+SBR 的优点：
+
+历史悠久，技术成熟
+binlog文件较小
+binlog中包含了所有数据库更改信息，可以据此来审核数据库的安全等情况
+binlog可以用于实时的还原，而不仅仅用于复制
+主从版本可以不一样，从服务器版本可以比主服务器版本高
+
+
+SBR 的缺点：
+
+不是所有的UPDATE语句都能被复制，尤其是包含不确定操作的时候。
+调用具有不确定因素的 UDF 时复制也可能出问题
+使用以下函数的语句也无法被复制：
+* LOAD_FILE()
+* UUID()
+* USER()
+* FOUND_ROWS()
+* SYSDATE() (除非启动时启用了 --sysdate-is-now 选项)
+INSERT ... SELECT 会产生比 RBR 更多的行级锁
+复制需要进行全表扫描(WHERE 语句中没有使用到索引)的 UPDATE 时，需要比 RBR 请求更多的行级锁
+对于有 AUTO_INCREMENT 字段的 InnoDB表而言，INSERT 语句会阻塞其他 INSERT 语句
+对于一些复杂的语句，在从服务器上的耗资源情况会更严重，而 RBR 模式下，只会对那个发生变化的记录产生影响
+存储函数(不是存储过程)在被调用的同时也会执行一次 NOW() 函数，这个可以说是坏事也可能是好事
+确定了的 UDF 也需要在从服务器上执行
+数据表必须几乎和主服务器保持一致才行，否则可能会导致复制出错
+执行复杂语句如果出错的话，会消耗更多资源
+
+RBR 的优点：
+
+任何情况都可以被复制，这对复制来说是最安全可靠的
+和其他大多数数据库系统的复制技术一样
+多数情况下，从服务器上的表如果有主键的话，复制就会快了很多
+复制以下几种语句时的行锁更少：
+* INSERT ... SELECT
+* 包含 AUTO_INCREMENT 字段的 INSERT
+* 没有附带条件或者并没有修改很多记录的 UPDATE 或 DELETE 语句
+执行 INSERT，UPDATE，DELETE 语句时锁更少
+从服务器上采用多线程来执行复制成为可能
+
+RBR 的缺点：
+
+binlog 大了很多
+复杂的回滚时 binlog 中会包含大量的数据
+主服务器上执行 UPDATE 语句时，所有发生变化的记录都会写到 binlog 中，而 SBR 只会写一次，这会导致频繁发生 binlog 的并发写问题
+UDF 产生的大 BLOB 值会导致复制变慢
+无法从 binlog 中看到都复制了写什么语句
+当在非事务表上执行一段堆积的SQL语句时，最好采用 SBR 模式，否则很容易导致主从服务器的数据不一致情况发生
+
+
+另外，针对系统库 mysql 里面的表发生变化时的处理规则如下：
+如果是采用 INSERT，UPDATE，DELETE 直接操作表的情况，则日志格式根据 binlog_format 的设定而记录
+如果是采用 GRANT，REVOKE，SET PASSWORD 等管理语句来做的话，那么无论如何都采用 SBR 模式记录
+注：采用 RBR 模式后，能解决很多原先出现的主键重复问题。
+
+
+所以如果要进行主从复制的话,最好是设定binlog的格式为mixed,可以防止因为binlog格式和mysql版本不一致导致的同步sql失败
+只需在配置文件中添加:
+
+binlog_format=mixed     # 默认是statement格式
+
+即可；
+
+
+============================================
+接下来正式实现MySQL主从复制：
+假如有1个主节点 1个从节点（一个从节点和多个从节点的操作相同）
+
+步骤如下：
+1.配置主节点：
+创建用户赋予权限
+开启binlog日志
+
+2.配置从节点
+配置同步主节点日志
+指定主节点的ip，端口，用户
+启动从节点
+
+
+主节点的配置步骤详情前面已经说过，这里主要说一下配置从节点的步骤
+
+创建用户：
+
+首先我们要创建用户，指定来访者的IP，指定该用户的权限
+
+现在我们指定用户名为repl，密码 repl，来访ip为 192.168.153.%,即这个网段的IP都能访问
+
+现在我们给该用户赋予权限
+grant replication slave on *.* to "repl"@"192.168.153.%" identified by "repl";
+
+意思是对repl这个用户赋予主从复制的权限，范围是所有库和表
+
+
+配置同步日志：
+server-id=10
+relay-log=/var/lib/mysql/relay-bin  #同步日志文件的路径
+relay-log-index=/var/lib/mysql/relay-bin.index  #同步日志文件索引的路径
+
+注意，同步日志和从服务器自己的二进制日志是两回事，同步日志只负责记录主节点的日志内容（主节点的操作），不会记录从节点本身的操作
+
+
+指定主节点的ip，端口，用户：
+change master to master_host="主节点主机ip",master_port=3306,master_user="用户",master_password="用户密码",master_log_file="mysql-bin.000001",master_log_pos=0;
+
+# 其中 master_log_file="mysql-bin.000001",master_log_pos=0 这两项不是随便填的，而是要在主节点执行show master status 来查看主节点当前使用的二进制文件名和最后的位置pos
+
+现在有个问题，如果主节点重启，那么主节点会新创建一个二进制日志文件并且接下来的操作会记录在这个二进制文件而不是之前的二进制文件。
+那么从节点可能就要重新指定主机点的master_log_file和master_log_pos。
+当然这个问题接下来会验证
+
+启动从节点:
+start slave 
+
+查看从节点状态：
+show slave status
+
+如果没有配置成功，看里面的Last_IO_Error这个字段，他会告诉你错误原因
+
+此时你很可能发现主节点连不上，这是因为防火墙以及数据库中配置文件限定了bind-address=127.0.0.1 ，也就是主节点只允许本机连接。
+
+如果是防火墙的问题，关闭防火墙，然后再从服务器中stop slave 再start slave
+如果是只允许本机连接，则在bind-address中添加一条从服务器的IP
+bind-address=127.0.0.1 从服务器IP
+
+设定bind-address=0.0.0.0 表示允许任何ip连接主服务器，但是这个行为很危险，如果你的数据库密码设置的简单的话很可能被入侵数据库。（修改配置文件后记得重启服务）
+
+具体的实例操作请看笔记 "6-1 主从复制实操.txt"
+
+======================================
+上面只是实现了主从复制,还没实现读写分离
+接下来使用PHP实现主从节点读写分离：
+
+思路很简单:
+1.定义好负责写的主节点的ip和众多从节点的ip
+2.根据sql语句判断是select还是增删改操作
+3.如果是增删改则连接主节点执行操作,否则连接从节点进行操作
+4.连接从节点的时候是遵循随机分配,使用mt_rand()函数即可
+
+如果是使用TP5的话更简单,只需要进行配置即可。
+
+======================================
+主主复制：
+有两个主节点A B，都有binlog日志，我们可以对A写和读，也可以对B写和读，不像主从复制，主节点负责写，众多从节点负责读。
+
+对节点A写，节点B可以同步节点A的数据，反之亦然
+
+也就是说A是主节点也是从节点，B也是主节点也是从节点；
+
+所以，我们只需要将上面的主从复制的步骤进行两遍即可：
+1.配置主节点：               | 
+创建用户赋予权限             |
+开启binlog日志               |
+                             |      x2
+2.配置从节点                 |
+配置同步主节点日志           |
+指定主节点的ip，端口，用户   |
+启动从节点                   |
+
+
+假设现在已经配置成功主主复制了，会出现这么一个问题：
+
+假设A节点往一个空的表 t1 插入5条数据（t1表只有一个主键字段id）:
+
+insert into t1 (id) value (null);   # 执行5次
+
+那么B节点也会自动插入5条数据，假设id为1，2，3，4，5；
+
+
+现在我往B节点插入一条数据
+insert into t1 (id) value (null);
+此时就会报错说主键重复。
+
+我们查看一下两个主节点的建表语句中的自增id
+show create table t1
+
+发现A节点的auto_increment=6 
+    B节点的auto_increment=1
+    
+也就是说B节点会复制A节点的数据却无法复制A节点的自增值。如果是在mysql 5.7，那么不存在这个问题，主节点之间会在同步数据的时候也同步自增。
+
+如果版本低于5.7 那么可以通过以下方法解决：
+设定 A节点设置自增的步长为2，自增id从1开始
+
+在配置文件中：
+auto_increment_increment=2   #步长
+auto_increment_offset=1      #从1开始
+
+# 重启服务
+
+设定 B节点设置自增的步长为2，自增id从2开始
+在配置文件中：
+auto_increment_increment=2   #步长
+auto_increment_offset=2      #从2开始
+
+# 重启服务
+
+当然，一开始数据要为空，从空表开始。
+这么一来，如果从A的t1表连续插入2条数据，他的id是1，3
+此时B的t1也是1，3
+
+再在B插入2条数据，此时查询表得到1，2，3，4
+
+如果有3个主服务器进行主主复制的话，那么步长要设置为3，而offset分别为1，2，3
+
+如果3台节点都是mysql 5.7 版本的，那么就不用这么设置。如果有一台是低于5.7版本的，就要这么设置。
+
+当然,如果是主从复制是不会出现这个问题的,因为从节点只负责读,不负责写入。
+
+PS：由于二进制日志不记录查询语句，所以对表A查询不会导致在表B又查询一次，所以主主复制也是可以进行负载均衡的。
+
+具体的实例操作请看笔记 "6-2 主主复制实操.txt"
+=============================================
+负载均衡集群
+
+架构是这样子的：一台主服务器，只负责写；多台从服务器（起码两台），只负责读；一台负载均衡节点，负责均匀的分配请求到多台从服务器。
+
+所以负载均衡集群至少需要4台服务器。
+
+使用负载均衡的好处：
+1.如果有一台从服务器挂掉了，负责负载均衡的服务器会将本来分配到该从服务器的请求分配给其他从服务器，不至于导致挂了一台从服务器，那么该台服务器的请求就得不到相应。
+
+2.如果没有负载均衡节点的调度，那么可能请求从节点A的人很多，造成A节点压力很大，请求节点C的人很少，造成资源浪费，但是有了负载均衡节点就不会有这种情况。
+
+负载均衡工具：
+Lvs，HaProxy，Nginx等
+
+Nginx是基于http协议的，也就是说，只能用于web应用（网站，Api之类的）,也就是说不能单独对MySQL进行负载均衡，只能对HTTP请求进行负载均衡
+LVS Linux的虚拟服务，但是需要的机器很多，适合大型服务
+HaProxy 基于TCP协议，可以代理MySQL
+
+性能 LVS > HaProxy > Nginx
+
+这里主要演示搭建HaProxy实现mysql从节点的负载均衡。
+
+1个主节点A，2个从节点B,C，1个负载均衡节点D
+
+架构如下：
+A 和 B，C已建立主从复制关系
+
+业务逻辑层（如PHP），已经配置好读写分离，当执行增删改时会去请求A，执行select时会随机请求B，C中的随便一个节点。
+
+搭建haproxy负载均衡，将BC绑定到节点D上面（注意D节点上不需要安装有数据库，只需要安装有haproxy即可），业务逻辑层的配置也进行修改，改为：执行增删改时会去请求A，执行select时会请求D节点。D节点就会将请求平均的分配到B,C节点，然后将从节点返回的数据返回给业务层。
+当然，由于像TP5这样的框架，请求数据库节点默认时3306端口，所以D节点的haproxy最好绑定3306端口，当业务层请求“D的ip:3306”时，业务层认为他请求的时一个数据库，其实D节点不是数据库，只是个中间代理而已，当然返回的是数据库的数据。
+
+下面是具体操作：
+A 首先，对主节点和2个从节点进行主从复制
+
+B 搭建haproxy：
+先对3个节点创建3个用户名密码相同的用户（在主节点创建即可，因为另外两个从节点会复制主节点的数据，在mysql库的user表自动增加用户记录）。
+关闭四台机器的防火墙。
+
+将下载好的haproxy放到负载均衡节点，解压，编译安装，具体安装过程可以上网查，这里我将安装过程贴出来：
+将下载的tar.gz文件放到/root下，然后：
+tar -xzf haproxy-2.1.2.tar.gz
+
+cd haproxy-2.1.2
+
+make TARGET=Linux31     # 这里需要使用uname -r查看系统版本centos6.X需要使用TARGET=linux26  centos7.x使用linux31 
+
+make install PREFIX=/usr/local/haproxy
+
+mkdir /usr/local/haproxy/conf   # 创建配置文件目录
+
+cp examples/option-http_proxy.cfg /usr/local/haproxy/conf/haproxy.cfg   # 复制配置文件
+
+配置文件内容如下：
+global
+        maxconn         20000
+        ulimit-n        16384
+        log             127.0.0.1 local0
+        uid             200
+        gid             200
+        chroot          /var/empty
+        nbproc          1
+        daemon
+
+frontend test-proxy
+        bind            192.168.200.10:8080
+        mode            http
+        log             global
+        option          httplog
+        option          dontlognull
+        option          nolinger
+        option          http_proxy
+        maxconn         8000
+
+        global配置
+
+        global 部分
+
+global
+用来设定全局配置参数，属于进程级的配置，通常和操作系统配置有关。
+
+global下
+log：全局的日志配置，local0 是日志设备，info表示日志级别。其中日志级别有err、warning、info、debug四种可选。这个配置表示使用 127.0.0.1 上的 rsyslog 服务中的local0日志设备，记录日志等级为info。
+
+maxconn：设定每个haproxy进程可接受的最大并发连接数，此选项等同于Linux命令行选项“ulimit -n”。
+
+user/group：设置运行 haproxy进程的用户和组，也可使用用户和组的 uid和gid 值来替代。
+
+daemon：设置 HAProxy进程进入后台运行。这是推荐的运行模式。
+
+nbproc：设置 HAProxy 启动时可创建的进程数，此参数要求将HAProxy 运行模式设置为“daemon”，默认只启动一个进程。根据使用经验，该值的设置应该小于服务器的 CPU核数。创建多个进程，能够减少每个进程的任务队列，但是过多的进程可能会导致进程的崩溃。
+
+pidfile：指定 HAProxy进程的 pid文件。启动进程的用户必须有访问此文件的权限。
+
+
+
+defaults 部分
+默认参数的配置部分。在此部分设置的参数值，默认会自动被引用到下面的 frontend、backend和 listen部分中，因此，如果某些参数属于公用的配置，只需在 defaults 部分添加一次即可。而如果在 frontend、backend和 listen部分中也配置了与 defaults 部分一样的参数，那么defaults部分参数对应的值自动被覆盖。
+
+
+frontend部分
+
+此部分用于设置接收用户请求的前端虚拟节点。frontend是在 HAProxy1.3版本之后才引入的一个组件，同时引入的还有 backend组件。通过引入这些组件，在很大程度上简化了 HAProxy配置文件的复杂性。frontend可以根据 ACL规则直接指定要使用的后端
+
+
+backend部分
+此部分用于设置集群后端服务集群的配置，也就是用来添加一组真实服务器，以处理前端用户的请求。添加的真实服务器类似于 LVS中的real server节点。
+
+5、listen部分
+
+此部分是 frontend 部分和 backend 部分的结合体。在 HAProxy1.3 版本之前，HAProxy 的所有配置选项都在这个部分中设置。为了保持兼容性，HAProxy 新的版本仍然保留了 listen 组件的配置方式。目前在 HAProxy 中，两种配置方式任选其一即可。
+
+
+这里我不过多的讲解选项，只讲解比较重要的选项：
+上面的是官方给出的配置文件，下面是我自己设置的配置：
+
+global
+    daemon
+    nbproc  1
+    pidfile /usr/local/haproxy/conf/haproxy.pid  # 这个待会要自己建
+        
+defaults
+    mode tcp        # 默认的模式(tcp|http|health),tcp是4曾，http是7层，health只返回OK
+    retries 2       # 两次连接失败就认为服务器不可用，也可以通过后面设置
+    option redispatch   # 当server选项指定的服务器挂掉后，强制定向到其他健康的服务器
+    option abortonclose     #当服务器负载很高，自动结束当前队列处理的比较久的连接
+    maxconn 4096        # 默认最大连接数
+    timeout connect 5000ms  #连接超时时间
+    timeout client 30000ms  #客户端超时
+    timeout server 30000ms  #服务器超时
+    log 127.0.0.1 local0 err
+        
+# 上面这些配置直接拿来用即可，不用死机，有印象知道其含义即可
+# 下面的配置就是我们要自己设置的
+
+listen test1        # 配置负载均衡的节点，test1是名字，可以随意
+    bind 0.0.0.0:3300   # haproxy服务监听的IP和端口，这里的0.0.0.0就是本机
+    mode tcp    # 数据库连接，肯定是tcp协议，这里其实可以不指定，因为前面已经指定过了
+    
+    server s1 节点1的IP:3306    # 指定从节点1的IP和端口
+    server s2 节点2的IP:3306    # 指定从节点2的IP和端口
+        
+# haproxy只需要绑定从节点的IP，因为读写时分离的，读都会去请求haproxy服务，然后haproxy服务才会去请求绑定的从节点，写会单独去请求主节点，不会经过haproxy的。
+
+
+接下来，创建pid文件，并启动haproxy
+vi /usr/local/haproxy/conf/haproxy.pid
+echo 1 > haproxy.pid 
+
+haproxy -f /usr/local/haproxy/conf/haproxy.cfg   # -f是指定配置文件，haproxy命令要添加到环境变量中，这个命令在/usr/local/haproxy/sbin下。
+
+启动成功后，就已经搭建负载均衡完毕。
+
+接下来测试一下
+
+具体的实例操作请看笔记 "6-3 mysql负载均衡实操.txt"
+
+
+
+
+Haproxy负载均衡的8中策略：
+roundrobin  简单的轮询
+static-rr   根据权重
+leastconn   最少连接的服务器优先连接
+source      根据请求ip进行哈希算法分配，也就是说同一个ip分到同一个服务器
+url         根据请求的uri分配
+url_param   根据请求的URI参数分配
+hdr         根据HTTP请求头锁定每一次HTTP请求
+rdp-cookie  根据cookie锁定并哈希每次tcp请求
+
+主要看前4种。
+
+只需在配置文件加一条（加载default下）：
+balance source      （balance 算法方式）  
+就可以使用根据ip的算法来负载均衡
+
+
+
+配置监控页面
+
+可以实时观测集群的活动情况：所以这应该是一个可观测的网页，配置的时候，应该绑定80接口或者8080,8888接口。绑定http协议。
+
+只需在配置文件加上
+listen admin_stats
+    bind 0.0.0.0:8888   #在本机的8888显示监控页面
+    mode http       #是页面，所以使用协议http
+    stats uri /test_haproxy     #指定页面名称
+    stats auth admin:admin      #指定监控页面的登陆信息
+    
+这样，在网页输入 “负载均衡节点ip:8888” 就能看到监控页面了。
+
+监控页面显示 no check ，表示对两台从节点还未监控，此时我们需要在原配置做出修改：
+server s1 节点1的IP:3306 check port 3306
+server s2 节点2的IP:3306 check port 3306
+
+这样haproxy会不时的向两个从节点的3306端口发送包，然后两个从节点会返回信息，如果从节点没有返回信息就说明出现问题。
+
+
+
+===============================================
+
+MySQL高可用集群
+
+之前我们搭建负载均衡的好处：
+一个是提高读取性能
+一个是当一台从节点挂掉，负载均衡节点会将请求平均的导到其他从节点，提高可用性。
+
+但是之前的例子只有一台写服务器（主节点），一台负载均衡节点，如果主节点挂掉，那么web应用就不能进行写操作，如果负载均衡节点挂掉就无法读取数据。
+
+为了避免这个问题，就要做一些冗余性操作：
+多设置一台主节点的备份节点，当我们写入的时候只往主节点写入，不往这个备份节点写入，也就是说正常情况下，备份节点什么都不用干。只有当主机点挂掉了之后，web应用才往这个备份节点写入。而备份节点当然也和所有从节点是主从复制的关系。
+备份节点和主节点是主主复制的关系，这样一方面平时备份节点会和主节点的新增数据同步；另一方面在主节点挂掉的期间，备份节点新增的数据也会写入到主节点里面（在主节点恢复正常后写入主节点）。
+
+然后负载均衡节点也同样是这样操作，多架设一台负载均衡节点，平时也是不起作用，当原负载均衡节点挂掉的时候，另一台负载均衡节点就会起作用。
+
+
+使用keepalived实现高可用：
+原理和过程:
+在主节点和主节点的备份节点（叫做主节点2）都安装keepalived。并通过keepalived的配置文件指定同一个虚拟IP,该虚拟IP和两台主节点的IP段要一致才行。
+当两台主节点都启动keepalived服务的时候，keepalived会在其中一台权重高的节点，即主节点1（权重可以在keepalived配置中指定）生成这个虚拟IP，另一个节点不会生成这个虚拟IP。
+我们连接mysql服务的时候，在业务层指定连接的host是这个虚拟IP的IP，而不是两台主节点的ip。
+此时虚拟IP是在主节点1中生成的，所以web应用其实连接的是主节点1。
+此时，主节点1和主节点2是有互相通信的。当主节点1因为故障（如断电，死机等原因）导致主节点1的keepalived服务断开，主节点2的keepalived接收不到主节点1的keepalived的响应，那么主节点2的keepalived就会在主节点2上生成这个虚拟ip。此时web应用连接的就是主节点2。
+当主节点1恢复过来，并且重启keepalived服务时，两个节点的通信恢复，而且主节点1权重比主节点2高，此时主节点1会重新生成该虚拟IP，柱节点2的虚拟IP就消失。那么相当于Web节点又连回主节点1。
+
+两个主节点最好设置开机自启动keepalived，不然主节点所在主机挂掉之后再恢复，但是忘记重启keepalived，那么虚拟ip就一直都在备份节点那。
+keepalived不仅仅只局限在mysql的高可用，其层面更高。
+
+
+下面正式进行操作：
+
+# 下载，解压，安装keepalived
+tar -xzf keepalived-2.0.19.tar.gz
+cd keepalived-2.0.19
+./configure             # 如果报错,请安装gcc-c++/openssl/openssl-devel这几个依赖
+make && make install
+
+此时 keepalive 的配置文件在 /usr/local/etc/keepalived/keepalived.conf 
+
+命令文件在 
+/usr/local/sbin/keeplive
+                 
+
+配置参数：
+下面是最简单的配置，也是作者的配置：
+
+! Configuration File for keepalived
+
+global_defs {
+   router_id LVS_MASTER     # 在每一个keepalived都有一个router_id，可以随便起,但相连通的keepalived的router_id不能一样。
+}
+
+vrrp_instance VI_1 {        # 配置实例
+    state MASTER    # 表示该keepalived的状态，有两种，MASTER和BACKUP。表示是主节点还是备份节点，但是并非在这里配置了MASTER就是主节点。而是要通过priority配置，优先级高的就是主节点。而且主节点的priority要比备份节点的起码高50才行
+    
+    interface eth0      #表示虚拟ip所绑定的网卡
+    virtual_router_id 51    # 虚拟路由节点的id号，主节点和备份节点的虚拟路由id必须相同
+    
+    priority 150    # 优先级，优先级高的是主节点，主节点平时处于工作状态，而备份节点平时不干事情，只有当主节点挂了才顶替主机点工作
+    
+    advert_int 1    # 我们知道 主节点和备份节点的keepalived是互相通信的。这里是通信的时间间隔，单位秒。该值越小，越消耗性能。
+    
+    authentication {    # 授权，有两种方式，默认使用PASS的方式
+        auth_type PASS  # 授权方式
+        auth_pass 1111  # 密码，连通的多台keepalived间的密码要相同
+    }
+    virtual_ipaddress {     # 要生成的虚拟IP地址，可以生成多个，可以随意指定，但是必须是和主节点以及备份节点相同的网段的ip才行
+        192.168.200.16/24   # 后面的/24表示子网掩码是255.255.255.0
+    }
+}
+
+接下来就可以启动了
+keepalived -D -f /usr/local/etc/keepalived/keepalived.conf          # -D后台运行
+
+然后执行
+ip add 
+可以看到eth0网卡下有本机ip信息，还有虚拟ip的信息，就表示成功了：
+inet 154.202.57.21/29 brd 154.202.57.225 scope global eth0
+valid_lft forever preferred_lft forever
+
+inet 154.202.57.100/24 scope global eth0
+valid_lft forever preferred_lft forever
+
+==============================================
+备份节点也安装keepalived，配置内容如下（和主节点的基本一样）：
+! Configuration File for keepalived
+
+global_defs {
+   router_id LVS_BACKUP
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth0
+    priority 100
+    advert_int 1    
+    authentication {   
+        auth_type PASS  
+        auth_pass 1111  
+    }
+    virtual_ipaddress {    
+        192.168.200.16/24  
+    }
+}
+
+将router_id/state/priority这3个配置改的和主节点不一样就行。
+
+接下来就可以启动了
+keepalived -D -f /usr/local/etc/keepalived/keepalived.conf
+
+# 查看ip
+ip add 
+
+发现这里并没有虚拟ip的信息。这是对的，因为虚拟ip只会在一台节点上出现，如果主节点挂掉了，那么虚拟ip才会出现在备份节点上。
+这里我设置了主节点的priority比备份节点的priority高50，所以当主节点重启keepalived服务的时候，虚拟ip会重新绑回到主节点上。
+
+在业务层，我们就直接连接这个虚拟ip，而我们实际连的是这个虚拟ip所在的节点上，当主节点正常工作时，虚拟ip在主节点上，那么我们实际连的就是主节点；当主节点挂掉，虚拟ip就会出现备份节点上，我们此时实际连接的就是这个备份节点。
+
+此时我们在本地连接一下这个虚拟IP的mysql（主节点和备份节点要关闭防火墙，而且要授权mysql用户给本地ip才行）
+连成功就说明可以了。
+
+
+PS：如果连不上，可能是防火墙没关；
+还有可能是你指定的虚拟IP是一个真实IP，该真实IP已存在，是别人的服务器。
+所以你必须绑定一个没有人用的ip作为虚拟ip才行。
+==============================================
+keepalived的邮件参数
+
+现在，假如主机点挂掉了，只剩下一台备份节点了，那么如果这个备份节点也挂掉了，那么就读取不了数据了。此时我们就要设置邮件报警，提示开发者只剩下一台节点了。
+
+邮件报警写在global_defs这个全局配置中，如下：
+global_defs{
+    noticatition_email{
+        wenzhangxiang@yeah.net      # 收件者
+    }
+    notification_email from 1640632344@qq.com       # 发件者
+    smtp_server localhost       # 本地安装smtp服务
+    smtp_connect_timeout 30     # 超时时间
+}
+
+但是本地还没有安装smtp服务，还要自己安装smtp服务。
+但是一般不会这样做。因为如果只是MySQL服务挂掉，但是keepalived服务没有挂掉，那么就不会发送邮件。
+
+我们一般会自己写shell脚本发送邮件，而且还是由keepalived来调用。
+接下来去搭建一个SMTP服务器：
+
+yum install postfix*
+
+cd /etc/postfix
+vi main.cf          # 配置文件
+
+修改的配置如下：
+myhostname = mail.abc.cn    # abc.cn必须是你的真实域名，是要在阿里云或者腾讯云解析这个域名到你的这个IP，最好是泛解析，也就是mail子域名可以用
+mydomain = abc.cn 
+myorigin = $myhostname
+myorigin = $mydomain
+inet_interfaces = all    # 网络的监听
+mydestination =  $myhostname,$mydomain        # 目标邮件地址
+mynetworks =  154.202.57.0/28,127.0.0.0/8      # 定义IP段
+relay_domains = $mydestination
+
+找到上面的配置一个个改。
+
+启动postfix服务：
+service postfix start
+netstat -an|grep master         #  postfix的进程名称是master,监听的端口是25
+
+postfix是发邮件的服务。
+
+下面安装收邮件的服务。
+yum install dovecot -y      # 如果实在Ubuntu下：apt-get install dovecot-common dovecot-imapd dovecot-pop3d
+
+配置dovecot：
+cd /etc/dovecot
+vi dovecot.conf
+
+将 protocol开头的那条配置的注释去掉即可。
+
+====================================
+如果在Ubuntu就这样配置：
+
+#这里配置邮件的存放目录，这里和Postfix设置的要一致，都是在用户主目录下的Maildir目录下。
+mail_location = maildir:~/Maildir
+#监听所有的端口
+listen= *
+#允许明文密码验证
+disable_plaintext_auth = no
+#使用ssl加密
+ssl = required
+#ssl秘钥存放路径，目前这两个文件也是不存在的，也需要按照后面的步骤我们手动生成
+ssl_cert =< /etc/ssl/certs/dovecot.pem
+ssl_key =< /etc/ssl/private/dovecot.key
+#设置认证的默认选项，auth是一个socket文件，通过该文件dovecot和postfix进行通信，来传递postfix的认证信息，这里面的path要和postfix设置的一致。
+auth default { 
+       socket listen {
+         client {
+           path =/var/spool/postfix/private/auth
+           mode = 0660
+           user = postfix
+           group = postfix
+         }
+     }
+}
+
+=======================================
+开启服务
+service dovecot start
+ps -aux|grep 110        # 它监听110端口
+
+测试邮件收发：
+yum install -y mail     # Ubuntu是 apt-get install mailutils
+
+这里发邮件的用户就是Linux的系统用户：
+所以这里要创建一个用户 
+useradd user1
+useradd user2
+
+接下来正式发送邮件
+在本地的cmd下，使用telnet连接该服务器的25端口：
+mail from:user1@abc.cn
+rcpt to:user2@abc.cn    
+data    # 表示要输入数据
+hello   # 正文内容
+.       # .表示结束
+quit    # 退出
+
+此时登录user2用户，执行 mail 命令即可看到邮件。
+PS：上面的配置是针对Centos的，如果是Ubuntu系统，需要在网上再去查配置的方法。
+
+=================================
+接下来编写shell脚本，该脚本的任务是监听主节点的MySQL的3306，如果主节点的3306端口挂掉了，就发送邮件。
+
+#!/bin/bash
+
+nc -w2 localhost 3306       # 监听3306端口
+if [ $? -ne 0]      # 如果端口挂掉了
+then
+    echo "mysql down" | mail root@abc.cn -s "mysql down"    # -s是主题
+    service mysql restart   # 重启MySQL
+fi
+
+
+#在真实开发中，我们可以在这个shell脚本中调用php脚本，让php脚本发送邮件到我们的真实的邮箱，而不是服务器中的邮箱。或者发送短信到手机。
+
+nc 命令可能要安装。
+记得要赋予脚本执行权限。
+
+但是上面的脚本不是执行了之后就持续监控的，而是执行一次才监控一次mysql，所以我们可以结合定时任务，每两分钟执行一次该脚本
+
+
+当然我们还可以在keepalived中配置去调用这个shell脚本，但是和使用定时任务的原理是相近的。
+配置内容如下：
+vrrp_script chk_mysql{      # 表示执行脚本任务，名称是chk_mysql
+    script "/root/mysql.sh"     # 执行的脚本的位置
+    interval 10                 # 执行间隔
+}
+
+vrrp_instance VI_1 {
+    # .....
+    track_script{   #表示由实例VI_1执行这段脚本
+        chk_mysql
+    }
+}
+
+重启keepalived服务即可
+=================================
+keepalived的负载均衡参数--其实就是在keepalived中指定服务，这里以指定mysql服务为例。
+如果只是搭建高可用，不使用keepalived负载均衡的配置也行，只需要上面的最基本的配置即可。但是最基本的配置会有一个问题：
+我们知道如果主节点的keepalived服务挂掉，那么虚拟IP就所代表的的真实IP就会转到备份节点。但是如果是mysql服务挂掉但是keepalived服务没有挂掉，那么keepalived就不会将虚拟IP转到备份节点，而我们的目的就是要对mysql服务进行高可用，这种情况下就没有达到我们的目的，所以还是要对keepalived的配置指定要绑定的服务的。
+
+virtual_server 虚拟IP 3306 {  # “虚拟IP 端口号” 虚拟IP是上面的virtual_ipaddress指定的IP，不含/24；端口号是你想指定的服务的端口号，如果想对网站进行负载均衡，就是80或443端口
+
+    delay_loop 6     #每隔6s检查一次联通性
+
+    lb_algo wrr      # 负载均衡的算法，wrr/rr/wlc，rr是轮询
+
+    lb_kind DR       # 负载均衡转发规则：DR/NAT/TUN，如果主节点和备份节点在同一网段下，用DR即可
+
+    persistence_timeout 60     #会话保持时间
+
+    protocol TCP          # 协议
+
+    real_server 本机的真实IP 3306 {  # 本机真实IP
+
+        weight 100      # 权重   
+ 
+        notify_down /data/sh/mysql.sh   
+
+        TCP_CHECK {  
+
+        connect_timeout 10  
+
+        nb_get_retry 3  
+
+        delay_before_retry 3  
+
+        connect_port 3306  
+
+        }  
+
+    }  
+
+}
+
+这里提一下notify_down /data/sh/mysql.sh 这个配置。
+表示当该节点的mysql服务挂掉是，要执行/data/sh/mysql.sh这个shell脚本。而这个脚本要做的事情就是将keepalived停止。原因很简单，mysql挂掉但是keepalived不挂掉，那么主节点会一直抢占着虚拟IP，为了将虚拟IP转移到备份节点，我们就要将主节点的keepalived杀死，这是/data/sh/mysql.sh这个脚本要做的事情，该脚本内容如下：
+
+#!/bin/bash
+pkill keepalive

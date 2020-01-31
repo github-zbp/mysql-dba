@@ -1,0 +1,1003 @@
+Mycat中间件
+
+我们知道水平分表会给业务层带来很多麻烦，例如
+
+有一个记录获奖人员的表，每年都会有获奖新人录入到这个表中
+我们以时间为维度进行表的切分，形式如下：
+
+t_archieve_2016
+t_archieve_2017
+t_archieve_2018
+...
+
+如果想要进行新增，我们要获取当前的年份，根据当前年份找到对应的表进行插入
+
+如果想根据id查询，我们就要进行union联合查询。
+
+如果上面的表不是在同一个节点而是分布在不同的节点，那么业务层的判断会更多。
+
+为了解决这个问题，Mycat就出现了。有了Mycat之后，Mycat连接数据库服务（Mycat可能是连一个节点的数据库也可能是连多个节点的数据库），而业务层直接连接Mycat服务而不直接连接mysql服务。无论是分库还是分表，无论分库分表是否在同一个节点，Mycat提供给业务层的都只是一个正常的库和一张正常的表。查询语句该找哪个节点的哪个表是Mycat该做的事，不是业务层该关心的事。这样一来业务层的逻辑就会减少很多判断，简单很多。
+
+由于mycat是处于Web应用和MySQL之间的一个桥梁角色，所以mycat是一种中间件。中间件连接着Web应用和MySQL，Web应用和MySQL不直接连接。
+
+Mycat使用的也是mysql的协议，换句话说就是，任何mysql客户端的命令，语法对Mycat都是有效的。我们可以用mysql -uroot -p来连接Mycat客户端，可以用select语句在mycat查询等。
+========================================
+
+Mycat的安装
+
+Mycat是基于Java实现的，所以要先安装Java。
+
+到官网下载Java SE 的rpm包。
+官网下载mycat
+
+# 安装Java
+rpm -ivh jdk-13.0.2_linux-x64_bin.rpm
+
+# 安装mycat
+tar -xzf Mycat-server-1.6.7.4-release-20200105164103-linux.tar.gz
+
+mv mycat /usr/local
+
+mycat命令是/usr/local/mycat/bin/mycat，将其写入环境变量中
+
+# 启动
+mycat console       # 前台运行
+
+* 启动时报错说
+Unrecognized VM option 'AggressiveOpts'
+Error: Could not create the Java Virtual Machine.
+关键是第一句，说虚拟机识别不了AggressiveOpts参数。
+第二句说启动不了Java虚拟机。
+
+# 修改mycat配置文件
+vi /usr/local/mycat/conf/wrapper.conf
+
+找到
+wrapper.java.additional.3=-XX:+AggressiveOpts
+将其注释即可。
+
+* 作者遇到的启动报错是：
+Invalid maximum heep size: -Xmx4G
+Error: Could not create the Java Virtual Machine.
+是配给Java的内存过高，我的服务器的内存不够
+
+# 修改mycat配置文件
+vi /usr/local/mycat/conf/wrapper.conf
+
+找到
+wrapper.java.additional.4=-XX:MaxDirectMemorySize=2G
+
+wrapper.java.additional.9=-Xmx4G
+wrapper.java.additional.10=-Xms1G
+
+将2G、4G、1G改为512M即可
+
+# 将所有的真实节点的MySQL设置为忽略表名大小写，否则后面会有很多问题，只需在mysql配置文件的[mysqld]加一条
+lower_case_table_names=1 
+
+记得重启
+可以通过 show variables like "%case%";  查看是否开启忽略大小写
+
+忽略表名大小写其实是将你在sql语句中的表名转为小写。
+所以如果你的表名一开始是大写的，之后才开启忽略大小写，那么无论你的sql语句里的表名是大写还是小写，都会提示报错说找不到这个表，因为他都转成小写了，而你的表名是大写的。
+
+如果MySQL没有开启忽略大小写，在mycat中创建表的时候，即使你的sql是小写的表名，在mysql真实节点中创建的都是大写的表名。
+
+# 启动 
+mycat console 
+
+# 启动成功后，mycat监听了8066端口，此时可以在本地连接mycat（要开放8066端口的防火墙）;我是在204.175.124.51这个机器上安装的mycat
+mysql -h204.175.124.51 -uroot -P8066 -p123456
+
+此时连的是mycat而不是mysql，mysql是3306端口。
+
+mycat连接的默认用户和密码是 root、123456，其配置在/usr/local/mycat/conf/server.xml
+mycat中有一个初始的库默认是TESTDB这个库（是一个虚拟库，真实不存在这样的库）,其配置在/usr/local/mycat/conf/schema.xml
+
+这两个配置文件至关重要 
+
+===================================================
+mycat初认识：
+
+现在我们要解决3个问题：
+1.root/123456用户是怎么生成的
+2.TESTDB这个库和里面的表是怎么生成的
+
+
+第一个问题：Mycat中的用户如何生成
+Mycat中的用户是在server.xml这个配置文件中添加并通过重启mycat服务生成的。
+先来看一下server.xml这个文件
+
+里面关于用户的配置如下
+<user name="root" defaultAccount="true">
+    <property name="password">123456</property>
+    <property name="schemas">TESTDB</property>
+    <property name="defaultSchema">TESTDB</property>
+    <!--No MyCAT Database selected 错误前会尝试使用该schema作为schema，不设置则为null,报错 -->
+    
+    <!-- 表级 DML 权限设置 -->
+    <!-- 		
+    <privileges check="false">
+        <schema name="TESTDB" dml="0110" >
+            <table name="tb01" dml="0000"></table>
+            <table name="tb02" dml="1111"></table>
+        </schema>
+    </privileges>		
+     -->
+</user>
+
+<user name="user">
+    <property name="password">user</property>
+    <property name="schemas">TESTDB</property>
+    <property name="readOnly">true</property>
+    <property name="defaultSchema">TESTDB</property>
+</user>
+    
+这里设置了两个用户并赋予他们权限：
+用户 root 密码 123456 该用户能对表TESTDB有增删改查操作
+用户 user 密码 user   该用户只能对TESTDB进行读操作
+
+我们可以在下面继续添加用户：
+<user name="hello">
+    <property name="password">hello</property>
+    <property name="schemas">TESTDB</property>      <!-- 指定能操作的数据库，这里可以通过写多个<property>指定操作多个数据库 -->
+</user>
+
+这是最简单的添加mycat用户的方法。这里是在mycat添加用户，但并没有对MySQL添加用户。一般来说，添加用户是为了管理schema（虚拟表），每个schema都需要在server.xml中定义（创建）一个用户来对该schema进行管理，此时只有该用户可以对该schema进行操作。
+
+
+第二个问题：mycat中的库和表怎么生成的
+
+虚拟库和虚拟表是在schema.xml这个配置文件中指定，然后通过重启mycat而生成的。
+<schema name="TESTDB" checkSQLschema="true" sqlMaxLimit="100" randomDataNode="dn1">
+    <!-- auto sharding by id (long) -->
+    <!--splitTableNames 启用<table name 属性使用逗号分割配置多个表,即多个表使用这个配置-->
+    <table name="travelrecord,address" dataNode="dn1,dn2,dn3" rule="auto-sharding-long" splitTableNames ="true"/>
+    <!-- <table name="oc_call" primaryKey="ID" dataNode="dn1$0-743" rule="latest-month-calldate"
+        /> -->
+</schema>
+
+<dataNode name="dn1" dataHost="localhost1" database="db1" />
+<dataNode name="dn2" dataHost="localhost1" database="db2" />
+<dataNode name="dn3" dataHost="localhost1" database="db3" />
+
+<dataHost name="localhost1" maxCon="1000" minCon="10" balance="0"
+          writeType="0" dbType="mysql" dbDriver="native" switchType="1"  slaveThreshold="100">
+    <heartbeat>select user()</heartbeat>
+    <!-- can have multi write hosts -->
+    <writeHost host="hostM1" url="localhost:3306" user="root"
+               password="123456">
+    </writeHost>
+    <!-- <writeHost host="hostM2" url="localhost:3316" user="root" password="123456"/> -->
+</dataHost>
+
+-----------------------------------
+<schema>指定了TESTDB这个虚拟库，里面<table>指定TESTDB这个虚拟库中要生成哪些虚拟表。这里指定生成 travelrecord和address这两个虚拟表。<table>的dataNode属性表示，这两个虚拟表要和哪些节点的真实物理表进行关联。
+-----------------------------------
+<dataHost>用于指定mycat要连接的Mysql的节点信息，包括节点IP，用户和密码。
+<heartbeat>用于隔一段时间探测所连接的MySQL节点是否已断掉。
+<writeHost>指定写节点
+<readHost>指定读节点
+------------------------------------
+<dataNode>指定分片节点，即真实的数据库是哪个节点（dataHost属性）的哪个库（database属性）。
+
+
+注意点：
+虚拟表和真实物理表的表名相同。
+可以在mycat登录的客户端中创建真实表，其对应的所有真实节点都会创建这个表。
+
+下面做一个小实例：
+mycat下创建一个shop虚拟数据库，该库下面创建product虚拟表，对应本机节点的shop1,shop2和shop3这3个库（即Mycat和Mysql都在一台主机上）。product表结构如下：
+create table product (
+    id int primary key auto_increment,
+    name varchar(255),
+    price decimal(10,2)
+)engine=innodb;
+
+
+下面是实操的步骤：
+
+1.修改schema.xml 
+<?xml version="1.0"?>
+<!DOCTYPE mycat:schema SYSTEM "schema.dtd">
+<mycat:schema xmlns:mycat="http://io.mycat/">
+
+	<schema name="shop" checkSQLschema="true" sqlMaxLimit="100" randomDataNode="dn1">
+		<!-- auto sharding by id (long) -->
+		<!--splitTableNames 启用<table name 属性使用逗号分割配置多个表,即多个表使用这个配置-->
+		<table name="product" dataNode="dn1,dn2,dn3" rule="auto-sharding-long" splitTableNames ="true"/>
+		<!-- <table name="oc_call" primaryKey="ID" dataNode="dn1$0-743" rule="latest-month-calldate"
+			/> -->
+	</schema>
+	<!-- <dataNode name="dn1$0-743" dataHost="localhost1" database="db$0-743"
+		/> -->
+	<dataNode name="dn1" dataHost="h1" database="shop1" />
+	<dataNode name="dn2" dataHost="h1" database="shop2" />
+	<dataNode name="dn3" dataHost="h1" database="shop3" />
+    
+	<dataHost name="h1" maxCon="1000" minCon="10" balance="0"
+			  writeType="0" dbType="mysql" dbDriver="native" switchType="1"  slaveThreshold="100">
+		<heartbeat>select user()</heartbeat>
+		<!-- can have multi write hosts -->
+		<writeHost host="hostM1" url="localhost:3306" user="root"
+				   password="xxxx">
+            <readHost host="hostM2" url="localhost:3306" user="root" password="xxxx"></readHost>
+		</writeHost>
+		<!-- <writeHost host="hostM2" url="localhost:3316" user="root" password="123456"/> -->
+	</dataHost>
+</mycat:schema>
+
+定义了写节点和读节点，这两个节点是同一个节点同一个MySQL服务。
+writeHost和readHost中的user属性的用户是MySQL真实用户而非mycat的登录用户。
+
+2.为shop这个虚拟库创建一个用户，该用户专门用来操作shop虚拟库
+在server.xml中，添加：
+
+<user name="zbp">
+    <property name="password">123456</property>
+    <property name="schemas">shop</property>
+</user> 
+
+PS：已知server.xml定义了一个root/123456的用户，该用户专门用来操作TESTDB虚拟库。
+但是如果schema.xml中没有定义TESTDB这个虚拟库，那么启动mycat时就会报错。
+
+3.重启mycat服务。
+
+4.在本地连接203.195.174.151的mycat服务,并创建product真实物理表。
+mysql -h203.195.174.151 -uzbp -P8066 -p123456
+
+show databases;
++----------+
+| DATABASE |
++----------+
+| shop     |
++----------+
+
+use shop;
+
+show tables;
++----------------+
+| Tables in shop |
++----------------+
+| product        |
++----------------+
+
+# 此时在MySQL中还没有创建shop1,shop2,shop3这3个真实的库，但是在mycat中依然能看到shop虚拟库和product虚拟表
+但是如果对product虚拟表查询，会报错说不存在这个表。
+
+# 现在在mysql中创建shop1,shop2,shop3这3个库
+create database shop1;
+create database shop2;
+create database shop3;
+
+# 在本地mycat客户端的shop虚拟表中创建product表：
+create table product (
+    id int primary key auto_increment,
+    name varchar(255),
+    price decimal(10,2)
+)engine=innodb;
+
+# 此时会同时在shop1~3都创建这个product表。
+
+现在插入一条数据
+insert into product values (null,"A",12);   # 报错：ERROR 1064 (HY000): partition table, insert must provide ColumnList
+意思是插入时要指定所有的字段名
+
+insert into product (`id`,`name`,`price`) values (null,"A",12);     # 报错：ERROR 1064 (HY000): columnValue:NULL Please eliminate any quote and non number within it.
+意思时不能用null占位
+
+insert into product (`id`,`name`,`price`) values (1,"A",12);    #插入成功
+
+
+
+现在这条数据并非同时插入shop1~3,而是只插入了shop1;这里涉及到了mycat的分片规则，后面会详细介绍。
+
+如果想查看到底插入了哪个库，可以
+explain insert into product (`id`,`name`,`price`) values (1,"A",12);    #来查看
+
+
+==============================================
+
+Mycat表切分规则
+
+在上面的例子中，插入的数据是插入到shop1这个库。但是随着数据量增大，数据也会插入到shop2和shop3这两个库，这要归因于在定义schema.xml的<table>标签中的rule="auto-sharding-long"这个属性。
+该属性指定该product表使用auto-sharding-long(范围约定)这个分片规则来分片。
+
+下面我们先看一下有哪些数据会写到shop1，哪些数据会写到shop2和shop3：
+
+explain insert into product (id,name,price) values (10000000,"asdf",1000);
++-----------+-------------------------------------------------------------------------+
+| DATA_NODE | SQL                                                                     |
++-----------+-------------------------------------------------------------------------+
+| dn2       | INSERT INTO product (id, name, price) VALUES ('10000000', 'asdf', 1000) |
++-----------+-------------------------------------------------------------------------+
+
+explain insert into product (id,name,price) values (15000000,"asdf",1000);
++-----------+-------------------------------------------------------------------------+
+| DATA_NODE | SQL                                                                     |
++-----------+-------------------------------------------------------------------------+
+| dn3       | INSERT INTO product (id, name, price) VALUES ('15000000', 'asdf', 1000) |
++-----------+-------------------------------------------------------------------------+
+
+发现当id为500万到1000万就会插入节点2，即shop2；当id为1000万到1500万就会插入shop3；
+超过1500万就会报错。
+
+所以这里是根据id的大小范围来划分节点的，在mycat中用了range分区的技术。
+
+其实这里的划分规则在schema.xml的<table>标签定义虚拟表的时候就定义好了的。
+<table name="product" dataNode="dn1,dn2,dn3" rule="auto-sharding-long" splitTableNames ="true"/>
+
+这里的规则是rule="auto-sharding-long"，即自动按长度分片(分区)。
+
+而规则是在rule.xml定义的
+<tableRule name="auto-sharding-long">
+    <rule>
+        <columns>id</columns>
+        <algorithm>rang-long</algorithm>
+    </rule>
+</tableRule>
+
+上面的配置意思是对id字段进行分区，分区的算法是range-long
+而range-long算法也可以在rule.xml找到。
+
+<function name="rang-long"
+          class="io.mycat.route.function.AutoPartitionByLong">
+    <property name="mapFile">autopartition-long.txt</property>
+</function>
+
+表示这个算法是写在 AutoPartitionByLong 这个类文件中的，这个类是写在mycat的java源码中。
+
+看不懂java源码没关系，重点看mapFile地图文件，该文件是具体的分区规则，在这里是autopartition-long.txt文件，该文件在mycat的配置目录中。
+
+内容如下：
+# range start-end ,data node index
+# K=1000,M=10000.
+0-500M=0
+500M-1000M=1
+1000M-1500M=2
+
+意思是 分区字段(id)在0~500万内就写入第一个节点，500玩~1000万写入第二个节点，后面一样的意思。
+
+所以即使我们不会Java，我们也可以在地图文件中编写规则来简单的制定自定义规则。
+mycat有多少中规则可以查看文档。
+
+==========================================
+Mycat中的基础概念：
+
+逻辑库 schema
+
+逻辑表（虚拟表） table
+可以是数据切分后，分布在一个或多个分片库（真实库）中，也可以不做数据切分，不分片，只有一个表构成。
+
+分片表
+指那些原有的很大数据的表，需要切分到多个数据库的表，这样，每个分片都有一部分数据，所有分片构成了完整的数据。
+
+非分片表
+指数据量不是很大的逻辑表，无需将数据切分到多个真实表，只放在一个真实的表就可以
+
+例如 Mycat有一个逻辑表A，对应3个节点库，每个库都有表A，逻辑表A的所有数据按一定算法分别存在3个节点库的真实表A中。这个逻辑表就是分片表
+
+<table node="t_node" dataNote="d1,d2,d3" rule="rule1" /> dataNode（数据节点）有3个，那么t_node表就是分片表
+
+<table node="t_node" dataNote="d1" rule="rule1" />
+此时t_node就是非分片表
+
+
+ER 表
+ER表这个概念和分片中的关联查询有关。我们知道在分片的情况下，有关联关系的两个表的数据如果在不同节点中，那么进行关联查询会有较大的性能问题。为了解决这个问题，提出了基于 E-R关系的数据分片策略，子表的记录与所关联的父表记录存放在同一个数据分片（同节点的同一个库中），即子表依赖于父表，通过表分组（Table Group）保证数据 Join 不会跨库操作。而表分组（Table Group）是解决跨分片数据 join的一种很好的思路，也是数据切分规划的重要一条规则。表分组意思就是将关联查询的表们放在同一分片中避免跨分片进行关联查询。
+
+ER表的实现方式可以通过在<table>标签中嵌套<childTable>标签的方式实现。
+例子：
+create table product(
+    id int unsigned primary key auto_increment,
+    name varchar(255),
+    price decimal(10,2),
+    type_id int     # 商品分类类型
+)engine=innodb;
+
+create table type(
+    id int unsigned primary key auto_increment,
+    type_name varchar(255)
+)engine=innodb;
+
+schema.xml
+<table name="type" primaryKey="id" dataNode="dn4,dn5,dn6" rule="mod-long">
+    <childTable name="product" primaryKey="id" joinKey="type_id" parentKey="id"></childTable>
+</table> 
+
+这里type是父表，product是字表，所以<table>和<childTable>中的name属性别写反了。
+type使用取模算法切分，product表无需指定算法，因为product会随type的切分而切分。joinKey是product表中的关联字段，parentKey是父表type中对应product的关联字段，即type中的id字段，这里不要写成type_id。
+
+全局表  type="global"
+全局表有以下特点：
+变动不频繁；
+数据量总体变化不大；
+数据规模不大，很少有超过数十万条记录。
+
+<table name="t_node" primaryKey="vid" autoIncrement="true" dataNode="dn1,dn2,dn3" />
+<table>标签中含有type="global"属性的逻辑表就是全局表，对这类表，如果指定dataNote="dn1,dn2,d3"，那么t_node这个逻辑表的数据会在这3个节点中冗余存在，也就说逻辑表t_node有10条数据，则dn1~3的三个t_node表都会有10条数据，而不像分片表那样每个节点中只包含t_node的一部分数据。
+这样设计的原因是解决分片表和全局表的关联查询问题，为了方便分片表和全局表的关联查询，索性让全局表在每个节点保存一份，通过数据冗余避免跨分片join。
+而这个也是一种MySQL分布式的架构思路。
+
+分片节点 dataNode
+一个逻辑表的数据切分后，一个大表被分到不同的分片数据库上面，每个表分片所在的数据库就是分片节点。
+
+所以分片节点是(真实)库，而不是表或者说是主机。
+
+节点主机 dataHost
+数据切分后，每个分片节点（dataNode）不一定都会独占一台机器，同一机器上面可以有多个分片数据库，
+这样一个或多个分片节点（dataNode）所在的机器就是节点主机（dataHost）,为了规避单节点主机并发数限制，
+尽量将读写压力高的分片节点（dataNode）均衡的放在不同的节点主机（dataHost）。
+
+全局序列号 sequence
+数据切分后，原有的关系数据库中的主键约束在分布式条件下将无法使用，因此需要引入外部机制保证数据
+唯一性标识，这种保证全局性的数据唯一标识的机制就是全局序列号（sequence）
+
+多租户
+是一种软件架构技术，它是在探讨与实现如何于多用户的环境下共用相同的系统或程序组件，并且仍可确保各用户间数据的隔离性。
+
+多租户在数据存储上存在三种主要的方案，分别是：
+A.独立数据库
+这是第一种方案，即一个租户一个数据库
+
+B.共享数据库，隔离数据架构
+即多个或所有租户共享一个Database(真实库)，但是每个租户一个 Schema（逻辑库）
+例如：
+有3个用户u1~3,他们购买了云数据库，每个用户都能够使用mysql -hxxx -uroot -p的方式让他们认为自己是在用mysql数据库服务。那么如果使用mycat实现单Database多Schema的话。可以如下配置：
+schema.xml
+<schema name="schema1" dataNode="dn1"></schema>
+<schema name="schema2" dataNode="dn1"></schema>
+<schema name="schema3" dataNode="dn1"></schema>
+
+<dataNode name="dn1" dataHost="h1" database="db1" />
+
+<dataHost name="h1" dbType="mysql" dbDriver="native">
+    <writeHost host="hostM1" url="localhost:3306" user="root" password="xxxxx">
+    </writeHost>
+    <readHost host="hostM1" url="localhost:3306" user="root" password="xxxxx"></readHost>
+</dataHost>
+
+server.xml 
+<user name="u1">
+    <property name="password">xxxxx</property>
+    <property name="schemas">schema1</property>
+</user> 
+<user name="u2">
+    <property name="password">xxxxx</property>
+    <property name="schemas">schema2</property>
+</user> 
+<user name="u3">
+    <property name="password">xxxxx</property>
+    <property name="schemas">schema3</property>
+</user> 
+
+现在u1~3这三个用户使用schema1~3这3个逻辑库，而这3个逻辑库实际上指向的是dn1这个分片节点，也就是指向localhost这台主机的db1这个真实库。他们可以在自己的逻辑库创建任意的表，但实际上3个用户的所有表都建在db1这个一表中。
+
+C.共享数据库，共享数据架构
+即租户共享同一个 Database、同一个 Schema，但在表中通过 TenantID 区分租户的数据。可以理解为，多个用户共用一个schema，每个用户使用不同的表，通过在表名标注用户前缀进行区分哪些表是哪个用户的。
+这是共享程度最高、隔离级别最低的模式。
+
+
+==========================================
+schema.xml/server.xml/rule.xml的标签和属性介绍
+
+这里只介绍重要的属性
+
+schema.xml 
+
+1.schema 标签（逻辑库标签）
+
+schema 标签用于定义 MyCat 实例中的逻辑库，MyCat 可以有多个逻辑库（虚拟库），每个逻辑库都有自己的相关配
+置。可以使用 schema 标签来划分这些不同的逻辑库。
+如果不配置 schema 标签，所有的表配置，会属于同一个默认的逻辑库。
+
+需要针对不同的逻辑库指定不同的用户（在server.xml中），只有相应的用户才可以使用其指定的虚拟库，否则查询和写入时会报错。如下：
+
+<user name="test">
+    <property name="password">123456</property>
+    <property name="schemas">TESTDB,shop</property>
+</user>
+
+用逗号隔开可以指定用户能够使用多个库。
+
+
+
+1.1 schema 标签的相关属性
+
+A. dataNode：该属性用于绑定逻辑库到某个具体的 database（分片节点） 上
+
+下面举例说明：
+假如<dataNode>标签中定义了dn1,dn2,dn3这3个节点库
+
+例1：
+
+schema定义如下
+<schema name="USERDB" checkSQLschema="false" sqlMaxLimit="100" dataNode="dn2"></schema>
+
+<schema>标签内，没有指定任何<table>，表示对USERDB的所有表的增删改，都会在dn2这个节点进行，不会在dn1和dn3进行。
+
+例2：
+schema定义如下
+<schema name="USERDB" checkSQLschema="false" sqlMaxLimit="100" dataNode="dn2">
+    <table name="tuser" dataNode=”dn1,d2,d3”/>
+</schema>
+
+表示USERDB的tuser表是分片写入dn1~3这3个节点库。而USERDB的其他表只能写入dn2这个节点库。
+
+B. checkSQLschema
+
+当该值设置为 true 时，如果我们执行语句select * from TESTDB.travelrecord;则 MyCat 会把语句修改为select * from travelrecord;。即把表示schema的字符去掉，避免发送到后端数据库执行时报（ERROR1146 (42S02): Table ‘testdb.travelrecord’ doesn’t exist）。
+
+其实，最好在写sql语句的时候不带库名。这样设不设置checkSQLschema属性都不影响。
+
+C. sqlMaxLimit
+<schema name="USERDB" checkSQLschema="false" sqlMaxLimit="100" dataNode="dn2">
+</schema>
+
+sqlMaxLimit="100" 表示USERDB下的表在查询时会自动加上 limit 100;
+
+
+2.table 标签（逻辑表标签）
+
+<table name="travelrecord" dataNode="dn1,dn2,dn3" rule="auto-sharding-long" ></table>
+
+Table 标签定义了 MyCat 中的逻辑表，所有需要拆分的表都需要在这个标签中定义。
+
+2.1 属性 
+
+name ：表名
+dataNode：定义这个逻辑表所可以分片到的 dataNode节点库
+
+如果需
+要定义的 dn 过多 可以使用如下的方法减少配置：
+<table name="travelrecord" dataNode="multipleDn$0-99,multipleDn2$100-199" rule="auto-sharding-long" ></table>
+
+<dataNode name="multipleDn$0-99" dataHost="localhost1" database="db$0-99" ></dataNode>
+<dataNode name="multipleDn2$100-199" dataHost="localhost1" database=" db$100-199" ></dataNode>
+
+rule：用于指定逻辑表要使用的分区规则，规则名字在 rule.xml 中定义
+ruleRequired :是否绑定分片规则
+
+primaryKey： 注明该逻辑表对应真实表的主键
+
+什么时候要注明primaryKey呢？
+当分片的字段不是主键字段的时候。这时如果使用主键在虚拟表进行查询，就会查所有的分片，效率就会很低。
+如果使用该属性配置真实表的主键。那么MyCat会缓存主键与具体 分片节点的信息，也就是说，用主键作为条件来查询就会直接找到这个分区来查而不会所有分区都查一次。
+
+type：用于指定逻辑表是不是全局表
+type="global" 是全局表
+不指定type则不是全局表
+
+autoIncrement：
+指定这个表有使用自增长主键，这样 mycat 才会不抛出分片键找不到的异常。
+
+needAddLimit：
+相当于sqlMaxLimit
+
+
+3. dataNode 标签 （分片节点标签）
+<dataNode name="dn1" dataHost="lch3307" database="db1" ></dataNode>
+
+dataNode 标签定义了 MyCat 中的分片节点
+
+例子中所表述的意思为：使用名字为 lch3307 数据库实例上的 db1 物理数据库，这就组成一个数据分片，最后，我们使用名字 dn1 标识这个分片。
+
+属性就只有 dataHost/database/name三个属性
+
+4.dataHost 标签（节点主机标签）
+直接定义了具体的数据库实例、读写分离配置和心跳语句
+
+name属性 略
+
+maxCon 
+每个读写实例连接池的最大连接。
+也就是说，标签内嵌套的writeHost、readHost标签都会使用这个属性的值来实例化出连接池的最大连接数。
+
+minCon
+读写实例连接池的最小连接
+
+balance
+负载均衡类型，目前的取值有 3 种：
+1. balance="0", 不开启读写分离机制，所有读操作都发送到当前可用的 writeHost 上。
+2. balance="1"，全部的 readHost 与 stand by writeHost 参与 select 语句的负载均衡，简单的说，当双
+主双从模式(M1->S1，M2->S2，并且 M1 与 M2 互为主备)，正常情况下，M2,S1,S2 都参与 select 语句的负载
+均衡而M1不能读。
+3. balance="2"，所有读操作都随机的在 writeHost、readhost 上分发。
+4. balance="3"，所有读请求随机的分发到 wiriterHost 对应的 readhost 执行，writerHost 不负担读压力，
+注意 balance=3 只在 1.4 及其以后版本有，1.3 没有
+
+balance=0 是M1可读可写；balance=1 是M1不可读可写
+writeType=0是Slave可读不可写
+
+writeType
+负载均衡类型，目前的取值有 3 种：
+1. writeType="0", 所有写操作发送到配置的第一个 writeHost，第一个挂了切到还生存的第二个 writeHost，
+重新启动后已切换后的为准，切换记录在配置文件中:dnindex.properties 
+2. writeType="1"，所有写操作都随机的发送到配置的 writeHost，1.5 以后废弃不推荐。
+
+switchType 
+-1 表示不自动切换
+1 默认值，自动切换
+2 基于 MySQL 主从同步的状态决定是否切换
+心跳语句为 show slave status
+3 基于 MySQL galary cluster 的切换机制（适合集群）（1.4.1）
+心跳语句为 show status like ‘wsrep%’
+
+这里切换的意思是，
+<dataHost name="localhost1" maxCon="1000" minCon="10" balance="1"
+    writeType="0" dbType="mysql" dbDriver="native" switchType="-1"  slaveThreshold="100">
+    <heartbeat>select user()</heartbeat>
+    <!-- can have multi write hosts -->
+    <writeHost host="hostM1" url="localhost:3306" user="root"
+            password="123456">
+    </writeHost>
+    <writeHost host="hostS1" url="192.168.244.146:3306" user="root"
+            password="123456" />
+    <writeHost host="hostS2" url="192.168.244.144:3306" user="root"                      
+            password="123456" />
+</dataHost>
+如果第一个主节点<writeHost>挂掉之后，第二个<writeHost>，也就是从节点，是否会自动切换为主节点来进行写操作。
+这里设置为switchType="-1"，意味着当主挂掉的时候，不进行自动切换，即hostS1和hostS2并不会被提升为主，仍只提供读的功能。这就避免了将数据写进slave的可能性
+
+dbType
+指定后端连接的数据库类型，支持mysql,mongodb,oracle,spark
+
+dbDriver
+指定连接后端数据库使用的 Driver，目前可选的值有 native 和 JDBC。使用 native 的话，因为这个值执行的是二进制的 mysql 协议，所以可以使用 mysql 和 maridb。其他类型的数据库则需要使用 JDBC 驱动来支持。
+
+
+5.heartbeat 标签
+该标签用于指定检查mycat和mysql服务是否还保持连接的语句
+例如,MYSQL 可以使用 select user()，Oracle 可以使用 select 1 from dual 等。
+在进行主从复制的时候，要用show slave status作为心跳语句而不能用select user()
+
+6.writeHost 标签、readHost 标签
+
+这两个标签都指定后端数据库的相关配置给 mycat，用于实例化后端连接池。唯一不同的是，writeHost 指定写实例、readHost指定读实例，组合这些读写实例来满足系统的要求。
+
+一般来说，readHost会作为子标签嵌套在writeHost标签内表示该读节点是同于该写节点的。
+
+在一个 dataHost 内可以定义多个 writeHost 和 readHost。但是，如果 writeHost 指定的后端数据库宕机，
+那么这个 writeHost 绑定的所有 readHost 都将不可用。另一方面，由于这个 writeHost 宕机系统会自动的检测
+到，并切换到备用的 writeHost 上去。
+这两个标签的属性相同。
+
+host 属性
+自定义的主机名称 一般 writeHost 我们使用*M1，readHost 我们用*S1。
+
+url 属性
+指定主机的IP地址。如果是使用 native 的 dbDriver，则一般为address:port 这种形式。
+
+user 属性/password 属性
+使用哪个用户和密码登录MySQL服务，这里的用户是mysql的用户而非mycat的用户。
+这里的user用户和password必须经过MySQL服务的授权才可以使用
+
+weight 属性
+权重 配置在 readhost 中作为读节点的权重
+
+
+
+
+
+server.xml 
+
+user 标签
+用于定义mycat的用户和权限。该标签的作用就是指定用户可以操作哪些schema。如果你只在schemas.xml中定义了schema，但是没有在server.xml中定义操作该schema的用户，那么你就无法对该schema操作。
+
+<user name="test">
+<property name="password">test</property>
+<property name="schemas">TESTDB</property>
+<property name="readOnly">true</property>
+<property name="benchmark">11111</property>
+<property name="usingDecrypt">1</property>
+<privileges check="false">
+    <schema name="TESTDB" dml="0010" showTables="custome/mysql">
+        <table name="tbl_user" dml="0110"></table>
+        <table name="tbl_dynamic" dml="1111"></table>
+    </schema>
+</privileges>
+</user>
+
+name属性 指定mycat的用户名
+
+property标签则是具体声明的属性值
+password 指定密码
+schemas  指定该用户能访问的逻辑库，在 mysql 客户端看来则是无法使用 use 切换到其他的数据库。可用逗号隔开来指定多个该用户可访问的schemas
+readOnly 为 true 或 false 来限制用户是否只是可读的；
+
+privileges 子节点
+是user标签的子标签。
+
+对用户的 schema 及 下级的 table 进行精细化的 DML（增删改查） 权限控制。
+
+check 属性是用
+于标识是否开启 DML 权限检查， 默认 false 标识不检查，当然 privileges 节点不配置，等同 check=false
+
+Mycat 一个<user>的 schemas 属性可配置多个 schema 如：
+<property name="schemas">TESTDB,DB1,DB2</property>
+
+所以 <privileges> 的子标签 <schema> 同样可配置多个，对多库多表进行细粒度的 DML 权限控制
+例如：
+
+<user name="zhuam">
+<property name="password">111111</property>
+<property name="schemas">TESTDB,TESTDB1</property>
+<!-- 表级权限: Table 级的 dml(curd)控制，未设置的 Table 继承 schema 的 dml -->
+<!-- TODO: 非 CURD SQL 语句, 透明传递至后端 -->
+<privileges check="true">
+    <schema name="TESTDB" dml="0110" >
+        <table name="table01" dml="0111"></table>
+        <table name="table02" dml="1111"></table>
+    </schema>
+    <schema name="TESTDB1" dml="0110">
+        <table name="table03" dml="1110"></table>
+        <table name="table04" dml="1010"></table>
+    </schema>
+</privileges>
+</user>
+
+由于<property name="schemas">TESTDB,TESTDB1</property>指定了2个schema
+
+所以<privileges>下也可以有两个<schema>标签，指定对这两个schema的权限
+
+<schema name="TESTDB" dml="0110" >  表示用户zhuam对TESTDB这个逻辑库的权限是不可插入，可更改，可查询，不可删除
+
+0110 对应 curd (create,update,read,delete)
+
+
+system 标签
+这个标签内嵌套的所有 property 标签都与系统配置有关
+
+charset 属性
+<system> <property name="charset">utf8</property> </system>
+
+===========================================
+Mycat的分片方式
+
+在数据切分处理中，特别是水平切分中，中间件最重要的两个处理过程就是数据的切分、数据的聚合。选择合适的切分规则，至关重要，因为它决定了后续数据聚合的难易程度，甚至可以避免跨库的数据聚合处理。
+
+方式1：全局表
+无需对数据进行分片，只要在所有的分片上保存一份数据的表就是全局。使用全局表的这种架构方式可以通过数据冗余到所有节点做到同分片内进行多表联查，避免了跨分片join。
+
+方式2：ER分片
+如果子表和父表是一对一的关联关系,而且数据量很大（需要分片）。
+将子表的记录和所关联的父表记录存放到同一个数据分片上的方式就是ER分片。好处是，可以避免跨分片join。此时要以关联字段为分片字段。
+
+例如 用户表和用户详情表/订单表和订单明细表
+order与order_detial 关联字段order_id
+
+schema.xml
+<table name="order" dataNode="dn$1-10" rule="mod-long">
+    <childTable name="order_detial" primaryKey="id" parentKey="id" joinKey="order_id"></childTable>
+</table>
+
+上面表示，对order表水平分表到10个节点,采用取模算法。
+<childTable>标签专门用于定义ER分片的子表，用了该标签就表示使用ER分片，并与父表order关联。joinKey和parentKey是指定关联id(joinKey是子表的关联字段，parentKey是父表的关联字段，一般就是父表的id)
+
+当然，一对多的情况也可以这样做，A表为主表，B表为子表，A放到10个分片中，将B中关联字段和A主键相同的数据放到同一个分片中。配置也是和上面是一样的。
+
+方式3：多对多关联
+情况如： 表1 -- 关联表 -- 表2
+这种情况下的分片会比较复杂，需要从业务角度来规划。
+关系表更偏向哪个表，即“A 的关系”还是“B的关系”，来决定关系表跟从那个方向存储
+
+例如 文章表 -- 关系表 -- 标签表，文章表标签表多对多关系。
+做3个分片，此时文章表水平划分数据到3个分片，关系表按和文章表一对多的关系将关系表中aritcle_id和文章表id相同的放同一个分区，标签表则看情况，如果标签表数据量少，就每个分片都放一份做为全局表，这样可以完美避免跨分片关联查询。如果标签表数据量多且经常变动就只能单独开一个分片或者选择文章表的其中一个分片（查询的最多的一个分片）来放标签表。
+此时是以文章表为主导的，也就是说经常通过查文章表联查标签表。如果是以标签表为主导就将上面的配置反过来，标签表放多个分片。
+不过一般来说，文章的数据量都是比标签要多得多的，主要是以文章为主导。
+
+方式4：主键分片 和 非主键分片
+当你没人任何字段可以作为分片字段的时候，主键分片就是唯一选择，其优点是按照主键的查询最快，当采用自动增长的序列号作为主键时，还能比较均匀的将数据分片在不同的节点上。
+若有某个合适的业务字段比较合适作为分片字段，则建议采用此业务字段分片，选择分片字段的条件如下：
+
+尽可能的比较均匀分布数据到各个节点上；
+该业务字段是最频繁的或者最重要的查询条件。
+
+常见的除了主键之外的其他可能分片字段有“订单创建时间”、“店铺类别”或“所在省”等。当你找到某个合适的业务字段作为分片字段以后，不必纠结于“牺牲了按主键查询记录的性能”，因为在这种情况下，
+MyCAT提供了“主键到分片”的内存缓存机制，热点数据按照主键查询，丝毫不损失性能。
+
+下面是非主键分片，在父节点的primaryKey上指定非主键的分片字段为逻辑表的主键。
+<table name="t_user" primaryKey="user_id" dataNode="dn$1-32" rule="mod-long">
+    <childTable name="t_user_detail" primaryKey="id" joinKey="user_id" parentKey="user_id" />
+</table>
+
+Mycat常见的分片规则
+就是我们说的分区规则，记录分片规则的配置是rule.xml
+
+<tableRule>标签用于定义一种算法
+name属性定义算法名称
+<columns>子标签 指定按哪个字段分区
+<algorithm>子标签 指定使用什么分片函数，分片函数需要用<function>定义 
+
+<function>标签 用于定义分片函数
+name属性 分片函数名
+clas属性 指定该分片函数使用的是java源码中的那个类
+<property>子标签 指定<function>的一些属性，其中：
+mapFile属性 指定该算法的具体分法的标识配置文件名称，该文件需要用户亲自创建和修改。当然，有些算法无需指定mapFile文件。例如mod-log取模算法，他只需在<property>中指定共有多少个切分表即可。
+其他属性会因不同算法而异。
+
+1.分片枚举  sharding-by-intfile （即我们常说的list分区）
+该分区方式类似于按照分类类型进行分区，例如按分类id分，按省市分等等。
+
+配置方式如下：
+<tableRule name="sharding-by-intfile">
+    <rule>
+        <columns>tid</columns>      # 指定tid，即我自定义的数据表中的分类id作为分区字段
+        <algorithm>hash-int</algorithm>
+    </rule>
+</tableRule>
+
+<function name="hash-int" class="io.mycat.route.function.PartitionByFileMap">
+    <property name="mapFile">partition-hash-int.txt</property>
+    <property name="type">0</property>      # type为0表示tid这个字段类型是整型；不为0则表示tid不是整型
+    <property name="defaultNode">0</property>   # defaultNode为0表示指定默认节点是第一个节点；默认节点的作用是当有不认识的tid的值，那么这条数据机会插入到默认节点。如果不指定tid又插入不认识的tid的值就会报错。
+</function>
+
+partition-hash-int.txt 的文件配置的写法：
+1=0
+2=1
+3=2
+4=3
+
+表示tid为1的数据写入第一个节点，tid为2的数据写入第二个节点...
+如果有tid为5的数据，那么这就是不认识的tid，如果不设置默认节点就会报错
+
+
+2.范围约定 auto-sharding-long  （即我们常说的range分区）
+<tableRule name="auto-sharding-long">
+    <rule>
+        <columns>id</columns>       #表示按照id字段进行分区
+        <algorithm>rang-long</algorithm>
+    </rule>
+</tableRule>  
+<function name="rang-long"
+          class="io.mycat.route.function.AutoPartitionByLong">
+    <property name="mapFile">autopartition-long.txt</property>
+</function>
+
+autopartition-long.txt：
+# range start-end ,data node index
+# K=1000,M=10000.
+0-500M=0
+500M-1000M=1
+1000M-1500M=2
+
+表示id在0到500万的记录会放在节点1,500万到1000万的数据放到节点2,1000万到1500万的数据放到节点3
+超过1500万就会报错 
+
+
+3.取模算法 mod-long  （即我们常说的hash分区）
+tableRule name="mod-long">
+    <rule>
+        <columns>id</columns>       # 根据id字段分区
+        <algorithm>mod-long</algorithm>
+    </rule>
+</tableRule>
+    
+<function name="mod-long" class="io.mycat.route.function.PartitionByMod">
+    <!-- how many data nodes -->
+    <property name="count">3</property>     # 指定只有3个分区表，按3这个数对id进行进行取模
+</function>
+
+此种在批量插入时可能存在批量插入单事务插入多数据分片，增大事务一致性难度。
+
+
+4.按日期（天）分片 sharding-by-date
+<tableRule name="sharding-by-date">
+    <rule>
+        <columns>createTime</columns>   # 按createTime字段分区，createTime字段必须是datetime类型，不能是int类型
+        <algorithm>partbyday</algorithm>
+    </rule>
+</tableRule>
+
+<function name="partbyday"
+          class="io.mycat.route.function.PartitionByDate">
+    <property name="dateFormat">yyyy-MM-dd</property>
+    <property name="sNaturalDay">0</property>
+    <property name="sBeginDate">2014-01-01</property>
+    <property name="sEndDate">2014-01-31</property>
+    <property name="sPartionDay">10</property>
+</function>
+配置说明：
+columns ：标识将要分片的表字段
+algorithm ：分片函数dateFormat ：日期格式
+sBeginDate ：开始日期
+sEndDate：结束日期
+sPartionDay ：分区天数，即默认从开始日期算起，分隔 10 天一个分区
+如果配置了 sEndDate 则代表数据达到了这个日期的分片后后循环从开始分片插入。
+
+5.取模范围约束 sharding-by-pattern
+此种规则是取模运算与范围约束的结合，主要为了后续数据迁移做准备，即可以自主决定取模后数据的节点分布。
+
+<tableRule name="sharding-by-pattern">
+    <rule>
+        <columns>user_id</columns>
+        <algorithm>sharding-by-pattern</algorithm>
+    </rule>
+</tableRule>
+
+<function name="sharding-by-pattern" class="io.mycat.route.function.PartitionByPattern"
+    <property name="patternValue">256</property>    # 表示256是被除数 id%256
+    <property name="defaultNode">2</property>       # 默认节点，如果配置了默认，则不会按照求模运算
+    <property name="mapFile">partition-pattern.txt</property>
+</function>
+
+1-32=0
+33-64=1
+65-96=2
+97-128=3
+129-160=4
+161-192=5
+193-224=6
+225-256=7
+0-0=7
+
+表示id%256得到的模在1-32的数据会插入节点1，以此类推。
+
+更多的分片算法可以参考mycat的官方文档。
+
+===========================================
+Mycat中的读写分离：
+读写分离都离不开主从复制，进行主从复制之后，主机点进行写操作，从节点进行读操作。
+Mycat不会进行主从复制，同步的工作需要在mysql中实现，mycat则负责配置读写分离。
+
+读写分离的配置如下：
+<dataHost name="localhost1" maxCon="1000" minCon="10" balance="1" 
+writeType="0" dbType="mysql" dbDriver="native">
+    <heartbeat>select user()</heartbeat>
+    <writeHost host="hostM1" url="localhost:3306" user="root" password="123456">
+        <readHost host="hostS1" url="localhost2:3306" user="root" password="123456" 
+        weight="1" />
+    </writeHost>
+</dataHost>
+
+上面配置了一个主节点hostM1,一个从节点hostS1,两个节点在不同主机。
+标签具有嵌套嵌套关系的<writeHost>和<readHost>表示是同步关系的两个节点。<readHost>嵌套在<writeHost>中则当写节点挂掉了，读节点也不可以用。
+关键点如下：
+a.balance要设为1，即开启读写分离，为0则读和写都会在<writeHost>实现
+b.写节点要用<writeHost>标记，从节点要用<readHost>标记
+
+
+或者
+<dataHost name="localhost1" maxCon="1000" minCon="10" balance="1" 
+writeType="0" dbType="mysql" dbDriver="native">
+    <heartbeat>select user()</heartbeat>
+    
+    <writeHost host="hostM1" url="localhost:3306" user="root" password="123456">
+    </writeHost>
+    <writeHost host="hostS1" url="localhost:3307" user="root" password="123456">
+    </writeHost>
+</dataHost>
+
+这一段配置主节点和从节点都是用writeHost标记，
+
+关于主从延时切换，我们知道主节点同步到从节点会有延时，如果延时太长，从从节点读取的数据是老数据。
+此时我们可以不从从节点读，而是从写节点读。
+只需在<dataHost>中使用switchType="2"和slaveThreshold="100"，并且<heartbeat>中定义心跳语句为：show slave status。
+Mycat 心跳机制通过检测 show slave status 中的 "Seconds_Behind_Master", "Slave_IO_Running",
+"Slave_SQL_Running" 三个字段来确定当前主从同步的状态以及 Seconds_Behind_Master 主从复制时延，
+当 Seconds_Behind_Master>slaveThreshold 时就会从主节点读取。
+====================================================
+
+有了上面的基础就可以开始做一些实验了
+
+8-1 主从复制 + Mycat读写分离
+
+8-2 Mycat读写分离+主从复制
+
+这里只是介绍一些思路性的东西。
+现在有一台Mycat，多台mysql主从节点，这个时候所有请求都指向一台Mycat服务。如果存在高并发，mysql进行了集群所以压力都分摊了，但Mycat只有一台，压力就会很大。
+
+此时我们要解决2个问题
+Mycat安全问题和Mycat性能问题
+
+安全问题：就是由于高并发导致mycat节点的宕机。此时我们可以多部署一台Mycat备份节点配合keepalived进行高可用。
+
+性能问题：保证了高可用的情况下，mycat可以持续访问，但是由于高并发导致查询很慢。这时候又分两种情况：
+一直都是高并发
+一段时间是高并发
+
+前者只能通过部署多台mycat主机+haproxy进行负载均衡，haproxy可能也要部署多台进行负载均衡和高可用。
+
+后者只需保持一台mycat和一台备份mycat，采用消息队列的方式处理高并发的请求。当然这是治标的方式。
+

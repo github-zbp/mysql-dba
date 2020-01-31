@@ -1,0 +1,41 @@
+######################################################################
+# This file contains examples of how to monitor private networks. To
+# monitor your private networks create an executable file in this same
+# directory named private.net. Use the example for your host os below.
+# Make sure not to remove the last line in this file. Your file
+# private.net MUST contain the rm lock.file line.
+######################################################################
+#Solaris Example
+######################################################################
+echo "zzz ***"`date`
+traceroute -r -F node1 
+traceroute -r -F node2 
+######################################################################
+#HP Example
+######################################################################
+echo "zzz ***"`date`
+traceroute -r -F node1 
+traceroute -r -F node2
+######################################################################
+#Linux Example
+######################################################################
+echo "zzz ***"`date`
+traceroute -r -F -m1 node1 
+traceroute -r -F -m1 node2
+######################################################################
+#Tru64 Example
+######################################################################
+echo "zzz ***"`date`
+traceroute -r -f node1
+traceroute -r -f node2
+######################################################################
+#AIX Example
+######################################################################
+echo "zzz ***"`date`
+traceroute -r node1
+traceroute -r node2
+######################################################################
+# DO NOT DELETE THE FOLLOWING LINE!!!!!!!!!!!!!!!!!!!!!
+#
+######################################################################
+rm lock.file

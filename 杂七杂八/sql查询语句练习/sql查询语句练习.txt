@@ -1,0 +1,195 @@
+//该练习的库是 tongji 库
+//20题以后的题当做扩展题,太复杂了,其实如果表结构设置合理的话根本不用写那么复杂的查询语句的
+
+*10、 查询Score表中的最高分的学生学号和课程号。（子查询或者排序）
+
+select sno,cno from score where degree =(select max(degree) from score)
+
+*11、 查询每门课的平均成绩(要显示课程名称)。
+*select s.cno,cname,avg(degree) from score s join course c on s.cno=c.cno group by s.cno
+select cno,avg(degree) from score group by cno
+
+*12、查询Score表中至少有5名学生选修的并以3开头的课程的平均分数。(这里虽然没说‘每门课'，但是还是用到了分组)
+
+select avg(degree) from score where cno like'3%' group by cno having count(*)>=5  --效率更高
+
+select avg(degree) from score group by cno having count(*)>=5 and  cno like'3%'
+
+13、查询分数大于70，小于90的Sno列。
+
+select sno from score where degree>70 and degree<90
+
+14、查询所有学生的Sname、Cno和Degree列。
+
+select sname,cno,degree from score join student on score.sno = student.sno
+
+*15、查询所有学生的Sno、Cname和Degree列。
+
+select sno,cname,degree from score join course on score.cno=course.cno
+
+*16、查询所有学生的Sname、Cname和Degree列。(发现了么，student和course是多对多关系，score是该二表的中间表)
+select sname,cname,degree from course c join student stu join socre s on c.cno=s.cno and stu.sno=s.sno  --三个表join的顺序无所谓
+select sname,cname,degree from score join student on student.sno=score.sno join course on score.cno = course.cno
+
+select sname,cname,degree from score,student,course where student.sno=score.sno and score.cno = course.cno
+
+*17、 查询“95033”班学生的平均分。
+select avg(degree) from score s join student stu on s.sno=stu.sno where class='95033'  --采用了多表联查
+select avg(degree) from score where sno in(select sno from student where class='95033') --由于要查寻的字段是分数，仅来自一个score表，所以采用了子查询不采用多表查询即可
+
+*18、 假设使用如下命令建立了一个grade表：(很好，遵守了1NF)
+
+create table grade(low  int(3),upp  int(3),rank  char(1))
+
+insert into grade values(90,100,'A'),(80,89,'B'),(70,79,'C'),(60,69,'D'),(0,59,'E');
+
+现查询所有同学的Sno、Cno和rank列。
+
+select sno,cno,rank from score,grade where degree between low and upp  --难点：既然要查的字段来自不同的两个表，那么就要用多表查询，但是找不到两个表关联的字段...没关联没事，有条件就行，其实这是个笛卡尔积...
+
+*19、  查询选修“3-105”课程的成绩高于“109”号同学成绩的所有同学的记录。
+select stu.* from student stu join score s on stu.sno=s.sno where cno='3-105' and degree>(select degree from score where sno=109 and cno='3-105');  --子查询中的cno='3-105'别漏了，因为就出成了查询选修“3-105”课程的成绩高于“109”号同学非“3-105”成绩的同学了，逻辑上有错误；而且该子查询是标量子查询，不加"cno='3-105'"就变成了列子查询，语法上有错误
+select * from score where cno='3-105' and degree>(select degree from score where sno='109' and cno='3-105')  --这是错误答案
+
+
+**20、查询score中选学多门课程的同学中分数为非最高分成绩的记录。--后一个条件太难，只需将前一个条件搞懂即可
+
+select * from score a where sno in (select sno from score group by sno having count(*)>1) and degree <(select max(degree) from score b where b.cno=a.cno)  --最后一个子查询来个b.cno=a.cno是指，最高分是刚刚选多门课的同学所选过的课的最高分
+
+*21、查询成绩高于学号为“109”、课程号为“3-105”的成绩的所有记录。 --和19题区别是，它不是同课程的分数相比，而是所有课程有比3-105课程的分高得课程都行
+
+select * from score where degree>(select degree from score where sno='109' and cno='3-105')
+
+--22、查询和学号为108的同学同年出生的所有学生的Sno、Sname和Sbirthday列。 --不做
+
+select * from student where YEAR(sbirthday) = (select YEAR(sbirthday) from student where sno='108')
+
+*23、查询“张旭“教师任课的学生成绩。
+
+select * from score where cno in(select cno from course where tno in(select tno from teacher where tname='张旭'))  --首先查的是学生成绩，所以数据源是score，又有是张旭教的课(不知道该老师教一门课还是两门，所以用in保险些)，所以有cno in (select cno from course where tname='张旭'),但是很遗憾course表中没有tname,只有tno，所以还得根据tname找到tno才行，所以有2层子查询where tno=(select tno where tname='张旭')
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+*24、查询选修某课程的同学人数多于5人的教师姓名。
+首先在表中，课程和老师是1对1关系，即一个老师教一门课，但是如果你没看表中的数据那么你是不知道一个老师教一门课
+所以你这里要当是课程和老师是多对1关系，可能一个老师教多门课
+所以这里应该解读为，上每门课的学生超过5个的课程对应的老师，而不是教的学生超过5个的老师
+由于这里涉及到tno(teacher和course表有),cno(course和score表中有),tname(teacher表中有)三个字段涉及到3个表，所以这里查询会跨3张表。
+首先，要找到超过5个学生的课程，具体多少个学生上什么课在score表中查，select cno from course group by cno having count(*)>5;
+再在course表中找到该课程对应的老师号，最后再在teacher表根据老师号找到老师名
+所以是1个外部查询，2个子查询，每个查询对应1张表
+select tname from teacher where tno in(select tno from course where cno in(select cno from score group by cno having count(*)>=5));
+
+如果你想在找到超过5个学生的课程号以后直接根据课程号找到老师名而不是先找到老师号再找老师名时可以对数据源做一个扩充
+将数据源变成一个teacher和course内连接后的二维表，这样cno,tno,tname就出现在一个表里面，就可以直接根据cno找到tname而跳过tno这一层
+select tname from teacher t join course c on t.tno=c.tno where cno in (select cno from score group by cno having count(*)>5);
+
+
+25、查询95033班和95031班全体学生的记录。
+
+select * from student where class in('95033','95031')
+
+26、  查询存在有85分以上成绩的课程Cno.
+
+select distinct cno from score where degree>85
+select cno from score where degree>85 group by cno;
+错误写法：select cno from score group by cno having degree>85;
+因为分组后的表只有cno一个字段，根本没有degree这个字段，自然就不能以degree为条件，所以正确做法应该是degree>85放在where中而非having中
+
+27、查询出“计算机系“教师所教课程的成绩表。
+同24题，也是跨三个表查
+select * from score where cno in(select cno from course where tno in(select tno from teacher where depart='计算机系'))
+
+**28、查询不同职称的教师的Tname和Prof。
+关键是：‘职称要不同’这个条件怎么写
+select tname,prof from teacher where depart='计算机系' and prof not in(select prof from teacher where depart='电子工程系')union
+select tname,prof from teacher where depart='电子工程系' and prof not in(select prof from teacher where depart='计算机系')
+
+select tname,prof from teacher a where prof not in(select prof from teacher b where b.depart != a.depart)
+
+*29、查询选修编号为“3-105“课程的学生且成绩至少高于它自己选修的编号为“3-245”的同学的Cno、Sno和Degree,并按Degree从低到高次序排序。
+select * from score a where cno='3-105' and degree>any(select degree from score b where cno='3-245' and a.sno=b.sno);
+
+*30.查询选修编号为“3-105“课程的学生且成绩至少选修编号为“3-245”的任一个同学的Cno、Sno和Degree。
+ 可以理解为高于3-245中成绩最低的学生
+ select * from score where cno='3-105' and degree>(select min(degree) from score where cno='3-245');
+ 或者直接按原来的题意：
+select * from score where cno='3-105' and degree>any(select degree from score where cno='3-245')
+
+*31、 查询所有教师和同学的name、sex和birthday.
+
+select sname name,ssex sex,sbirthday birthday from student
+union
+select tname,tsex,tbirthday from teacher
+由于联合查询会保留第一个查询的字段名，但第一个查询的字段名是老师的，所以起了个别名
+
+32、查询所有“女”教师和“女”同学的name、sex和birthday.
+
+select sname,ssex,sbirthday from student where ssex='女'
+union
+select tname,tsex,tbirthday from teacher where tsex='女'
+
+*33、 查询成绩比该课程平均成绩低的同学的成绩表。
+
+select * from score a where degree<(select avg(degree) from score b where b.cno=a.cno)
+说明下：b.cno=a.cno是指该课程和该自己课程相比，就是说查成绩比该成绩自己的平均成绩低的，而不是比其他成绩的平均成绩低的，否则和别的成绩的平均成绩比就没有可比性了
+所以，里面的"avg(degree)"是某一门课程的平均成绩，而非所有课程综合的平均成绩
+
+*34、 查询所有考了试的课程老师的Tname和Depart.
+select tname,depart from teacher where tno in(select tno from course where cno in(select cno from score group by cno));
+或者
+select tname,depart from teacher where tno in(select tno from course where cno in (select distinct cno from score))
+
+35 、 查询所有未讲课的教师的Tname和Depart.
+
+select tname,depart from teacher where tno not in(select tno from course where cno in (select distinct cno from score))
+
+**36、查询至少有2名男生的班号。
+难在，怎么写“大于等于2个男生”这个条件。
+不可能where count(*)>=2
+也不可能 where (select count(*) from student where ssex='男' group by class)>=2
+所以可以这样，select count(*) as num ...where ssex='男' group by class，然后，条件处写having num>=2即可，就是加个字段别名的事，但是不能where num>=2，因为where后面是不能用字段别名做条件的
+select class from (select class,ssex,count(*) num from student where ssex='男' group by class having num>=1) as new_table;
+还有另一种方法更简单
+select class from student where ssex='男' group by class having count(*) >1
+
+37、查询Student表中不姓“王”的同学记录。
+
+select * from student where sname not like '王%'
+
+
+40、以班号和年龄从大到小的顺序查询Student表中的全部记录。
+
+select * from student order by class desc,sbirthday asc
+
+*41、查询“男”教师及其所上的课程。
+只能用多表联查，不能用子查询
+select tname,cname from course,teacher where course.tno = teacher.tno and teacher.tsex='男'
+
+*42、查询最高分同学的Sno、Cno和Degree列。
+
+select * from score where degree = (select max(degree) from score)
+
+select top 1 * from score order by degree desc
+
+查询每门课最高分同学的Sno、Cno和Degree列
+select * from score where degree in (select max(degree) from score group by cno);
+
+*43、查询和“李军”同性别的所有同学的Sname.
+
+select sname from student where ssex=(select ssex from student where sname='李军')
+
+*44、查询和“李军”同性别并同班的同学Sname.
+用标量子查询：
+select sname from student where ssex=(select ssex from student where sname='李军') and class = (select class from student where sname='李军')
+用行子查询：
+select sname from student where (ssex,class)=(select ssex,class from student where sname='李军');
+
+*45、查询所有选修“计算机导论”课程的“男”同学的成绩表。
+
+select * from score where sno in(select sno from student where ssex='男') and cno in(select cno from course where cname='计算机导论')
+
+sno in(select sno from student where ssex='男')表示：学生是怎样的学生呢?是性别为男的学生
+cno in(select cno from course where cname='计算机导论')表示：课是怎样的课呢？是课名为计算机导论的课

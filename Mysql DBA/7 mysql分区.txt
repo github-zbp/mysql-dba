@@ -1,0 +1,168 @@
+集群和分布式的概念不同。
+
+集群的概念是通过主从复制或者主主复制的手段，将含有相同数据库的mysql服务部署多个节点进行冗余数据保存和负载均衡，重点是多节点。
+
+分布式则是分库分表分区等手段。例如原先一个项目的数据库中有很多表，分布式是将不同的表放到不同的库，达到提高性能的目的，但是其产生的问题是跨库的增删改查和事务的问题。
+
+下面举例说明分库分表的情景：
+
+1.假如在主从复制的架构中，如果只有一台写节点，但写的请求很多造成该主节点的压力很大就会出现很多问题，比如从节点的同步延时问题。
+为了减轻主节点的压力，我们可以对主节点进行负载均衡。
+或者将主节点一个库中的某些表放到另一台机器（也是主节点）的相同库名的库中。这样写入数据的时候A表写入主节点1，B表写入主节点2，从节点同时同步主节点1和2。
+这样通过分库（将数据库不同表拆分到不同的机器上）的方式达到减轻主节点增删改的目的。
+这是一种垂直切分。
+
+2.再介绍一种垂直切分的情况。
+例如某节点的数据库有A表和B表，两个表都有很多条数据（千万级）。
+现在将数据分一半放到另一个节点中，该节点也有A表和B表。
+
+这是库级别的垂直拆分。
+
+表级别的垂直拆分就是将多字段的一张表拆分成两张表并建立关联。
+
+
+
+水平切分的几种方式
+按主键范围切分
+按日期范围切分
+按指定字段取模拆分（适合已定节点数的拆分，例如已定为5个节点，那么取模数就是5）
+
+垂直切分的几种方式
+库的切分，将同一个库的不同表拆分到相同节点的不同库或者不同节点的相同的库
+表的切分，即字段的切分
+
+水平切分和垂直切分总称为逻辑切分。还有物理切分，即把单个很大的数据表文件拆为多个文件,这就是我们所常说的表分区。
+
+=======================================
+分区
+
+先复习一下Myisam和InnoDB这两种引擎的文件存储格式：
+
+Myisam:
+frm 存表结构的文件
+MYD 存表数据的文件
+MYI 存索引的文件
+
+Innodb：
+frm 存表结构的文件
+ibd 存表数据的文件
+
+Innodb又分为两种：共享表空间和独享表空间
+共享表空间就是一个库的所有表都放在一个文件中，如ibddata1这个文件就是共享表空间。
+独享表空间就是一个表单独放在一个文件中。
+
+很明显，独享表空间的性能更高。
+
+show variables like "%innodb_file_per_table%";
+
+这个参数为ON表示使用独享表空间。
+
+分表的情况是
+tb_1    对应      文件1（包含结构文件和数据文件）
+tb_2    对应      文件2（包含结构文件和数据文件）
+tb_3    对应      文件3（包含结构文件和数据文件）
+
+数据插入哪个表或者数据查询从哪个表查，我们要在业务层自己写算法来判断
+
+分区的情况是（假如分区为3个区）
+                    文件1
+tb      对应        文件2
+                    文件3
+                    
+分成几个区，就会生成几个文件，但是表还是1个表。
+而算法和策略不需要再业务层自己实现，而是mysql内部实现。
+
+
+常见分区的策略有4种：
+Range:如id为1~100的数据存放到第一个分区，101~200放到第二个分区，...依次类推（以连续型数据字段作为分区的字段）
+
+List:如分类A的数据放到第一个分区，B分类的数据放第二个分区，...以此类推（以离散型数据字段作为分区字段）
+
+Hash：如对字段取模，将模相同的数据放到相同分区
+
+Key：和Hash类似，可以对某字段使用表达式作为分区标准。这个和Hash本质还是一样的。
+
+重点是前3个。
+
+PS：建立分区的字段必须是主键字段或者被包含在主键字段（如复合主键）中。
+
+例子如下：
+# 在test库先建立一个普通的表作：
+create table t_base(id int primary key auto_increment,name varchar(10))engine=innodb;
+
+insert into t_base (name) values ("zbp");
+
+insert into t_base (name) select name from t_base;    # 蠕虫复制400多万条数据。
+
+select count(*) from t_base;    # 4194304
+
+# 更改他们的name字段为随机的数字
+update t_base set name=ceil(rand()*5000000);
+
+
+现在mysql存放数据的目录的test目录中可以看到t_baes.ibd（290M）和t_base.frm文件
+
+-------------------------------
+
+# 创建range分区的表
+create table t_range(
+    id int primary key auto_increment,
+    name varchar(10)
+)engine=innodb partition by range(id)(
+    partition p0 values less than (1000000),       # p0是分区名
+    partition p1 values less than (2000000),
+    partition p2 values less than (3000000),
+    partition p3 values less than (4000000),
+    partition p4 values less than (5000000)  #可使用maxvalue关键字表示最大的id数
+);
+# 此时会出现t_range#p#p0~4.ibd这4个表数据文件和一个t_range.frm表结构文件。
+
+
+# 将t_base数据写入t_range中
+insert into t_range select * from t_base;
+
+# PS，如果删除某个分区，该分区下的数据会被删掉。
+alter table t_range drop partition p4;
+
+# 查看分区情况
+show create table t_range;
+
+---------------------------
+
+# 创建List分区，List分区字段必须是int型，不能是字符串型
+create table t_list(
+    id int auto_increment,
+    type_id int ,
+    name varchar(20),
+    primary key (id,type_id)
+)engine=innodb partition by list(type_id)(
+    partition p0 values in (1,2,3),
+    partition p1 values in (4),
+    partition p2 values in (5,6)
+);
+
+# 往t_list中插入500万数据
+insert into t_list (id,type_id,name) select id,ceil(rand()*6) type_id,name from t_base;
+
+-------------------------------------
+
+# 创建hash分区，要指定分区个数，生成的4个表数据文件是一样大的，因为hash分区方式会将数据平均分配到每个分区，其实是取模算法。
+create table t_hash(
+    id int primary key auto_increment,
+    name varchar(10)
+)engine=innodb partition by hash(id) partitions 4;
+
+# 指定创建4个分区，对id进行4的取模
+
+select * from t_hash limit 10;  # 从第一个分区获取10条数据，第一个分区是模为0的分区，故得到的id都是4的倍数
+---------------------------------------
+PS 如果只想移除分区但不想删除数据可以使用
+alter table xxx remove partitioning;
+
+但会删除所有分区
+
+作者不推荐使用分区，因为mysql 5.7版本以前的分区功能有比较大不稳定性，可能造成比较严重的性能问题。
+
+更多关于分区的操作如合并分区，修改分区可参考网上资料
+=======================================
+
